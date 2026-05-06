@@ -186,6 +186,7 @@ def main_menu():
 
 def back_btn(): return InlineKeyboardBuilder().button(text="🔙 Назад",callback_data="back").as_markup()
 
+# ===== /start =====
 @dp.message(Command("start"))
 async def start(message: Message):
     args = message.text.split()
@@ -228,6 +229,7 @@ async def start(message: Message):
     txt += f"🔗 Реф-ссылка:\n<code>{ref_link}</code>\n\n<b>Выбирай действие:</b>"
     await message.answer(txt,reply_markup=main_menu())
 
+# ===== /ref =====
 @dp.message(Command("ref"))
 async def ref_cmd(message: Message):
     uid = message.from_user.id
@@ -241,649 +243,7 @@ async def ref_cmd(message: Message):
     txt = f"<b>🔗 РЕФЕРАЛЬНАЯ СИСТЕМА</b>\n\n👥 Рефералов: <b>{cnt['c']}</b>\n💎 +5% от тапов рефералов\n🎁 Реферал получает +500 сат\n\n🔗 Ссылка:\n<code>{ref_link}</code>"
     await message.answer(txt,reply_markup=back_btn())
 
-@dp.callback_query(F.data=="back")
-async def back(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        u = await get_user(db,uid)
-        bv = calc_btc(u)
-        rank = calc_rank(bv)
-    txt = f"<b>💀 DEGEN EMPIRE</b>\n\n🏷 {RANK_EMOJI.get(rank,'')} {rank} | 💰 {u['sat']:,.0f} сат\n₿ BTC: <b>${prices.get('BTC'):,.0f}</b>\n\n<b>Выбирай действие:</b>"
-    await callback.message.edit_text(txt,reply_markup=main_menu())
-
-@dp.callback_query(F.data=="rates")
-async def rates(callback: CallbackQuery):
-    await prices.fetch()
-    txt = "<b>💱 КУРСЫ (Binance/CoinGecko)</b>\n\n"
-    for sym in ["BTC","ETH","LTC","DOGE","SOL","XRP","PEPE","SHIB","BONK"]:
-        pr = prices.get(sym); ch = prices.changes.get(sym,0)
-        sgn = "+" if ch>=0 else ""; em = "📈" if ch>=0 else "📉"
-        fmt = f"{pr:,.2f}" if pr>1 else f"{pr:.8f}"
-        txt += f"{em} <b>{sym}</b>: ${fmt} ({sgn}{ch:.2f}%)\n"
-    txt += f"\n<i>Обновлено: {datetime.now().strftime('%H:%M:%S')}</i>"
-    await callback.message.edit_text(txt,reply_markup=back_btn())
-
-@dp.callback_query(F.data=="profile")
-async def profile(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        u = await get_user(db,uid)
-        bv = calc_btc(u)
-        rank = calc_rank(bv)
-        duels = f"{u['duel_wins']}W/{u['duel_losses']}L"
-        wr = f"{u['duel_wins']/(u['duel_wins']+u['duel_losses'])*100:.0f}%" if (u['duel_wins']+u['duel_losses'])>0 else "—"
-        ach_cnt = await db.execute("SELECT COUNT(*) as c FROM ach WHERE tid=?",(uid,))
-        ach_cnt = await ach_cnt.fetchone()
-        now = time.time()
-        stake_info = ""
-        if u['staked_sat']>0 and u['stake_end']>now:
-            rem = u['stake_end']-now
-            stake_info += f"🔒 Сатоши: {u['staked_sat']:,.0f} (ещё {int(rem//3600)}ч)\n"
-        if u['staked_btc']>0 and u['stake_btc_end']>now:
-            rem = u['stake_btc_end']-now
-            stake_info += f"🔒 BTC: {u['staked_btc']:.8f} (ещё {int(rem//3600)}ч)\n"
-    txt = f"<b>👤 ПРОФИЛЬ</b>\n\n🏷 {RANK_EMOJI.get(rank,'')} <b>{rank}</b>\n💰 Сатоши: {u['sat']:,.0f}\n₿ BTC: {u['btc']:.8f}\n"
-    txt += f"💎 Капитал: {bv:.4f} BTC (${bv*prices.get('BTC'):,.0f})\n🖐 Тапов: {u['total_taps']:,}\n⛏ Хешрейт: {u['mining_hs']:.1f} H/s\n"
-    txt += f"⚔️ Дуэли: {duels} ({wr})\n🏆 Достижений: {ach_cnt['c']}\n🎁 Лутбоксов: {u['lootboxes']}\n"
-    if stake_info: txt += f"\n{stake_info}"
-    txt += f"\n🔗 Реф-код: <code>{u['ref_code']}</code>"
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🏆 Достижения",callback_data="ach_list")
-    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
-    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data=="ach_list")
-async def ach_list(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        e = await db.execute("SELECT ach_id FROM ach WHERE tid=?",(uid,))
-        e = await e.fetchall(); ids = [x['ach_id'] for x in e]
-    txt = "<b>🏆 ДОСТИЖЕНИЯ</b>\n\n"
-    for aid,info in ACH.items():
-        done = "✅" if aid in ids else "🔒"
-        txt += f"{done} {info['n']} +{info['r']} сат\n"
-    await callback.message.edit_text(txt,reply_markup=back_btn())
-
-@dp.callback_query(F.data=="tap")
-async def tap(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        u = await get_user(db,uid)
-        bv = calc_btc(u); rank = calc_rank(bv)
-        bonus = {"Нищий":1.05,"Барыга":1.1,"Майнер":1.15,"Кит":1.2,"Мегакит":1.3,"Деген":1.3}.get(rank,1.0)
-        reward = u['tap_power']*bonus*(1+u['multi_tap']*0.25)
-        new_sat = u['sat']+reward; new_taps = u['total_taps']+1
-        await db.execute("UPDATE users SET sat=?,total_taps=? WHERE tid=?",(new_sat,new_taps,uid))
-        if u['ref_by']: await db.execute("UPDATE users SET sat=sat+? WHERE tid=?",(reward*0.05,u['ref_by']))
-        await add_xp(db,uid,1)
-        if u['daily_date']==datetime.now().strftime('%Y%m%d'): await db.execute("UPDATE users SET daily_tap=daily_tap+1 WHERE tid=?",(uid,))
-        await db.commit()
-        if new_taps==1: await give_ach(db,uid,"first_tap")
-        if new_taps>=1000: await give_ach(db,uid,"tap_1000")
-        if new_taps>=100000: await give_ach(db,uid,"tap_100k")
-    txt = f"<b>🖐 ТАП!</b>\n\n💎 +{reward:.1f} сат\n💰 Баланс: {new_sat:,.0f} сат\n👆 Тапов: {new_taps:,}\n⚡ Сила: x{bonus:.2f}"
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🖐 Тапнуть ещё!",callback_data="tap")
-    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
-    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data=="mining")
-async def mining(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        u = await get_user(db,uid)
-        now = time.time(); elapsed = now-u['last_mine'] if u['last_mine']>0 else 0
-        income = u['mining_hs']*(1.0/prices.get("BTC"))*elapsed
-        if income>0: await db.execute("UPDATE users SET sat=sat+?,last_mine=? WHERE tid=?",(income,now,uid)); await db.commit(); u = await get_user(db,uid)
-    txt = f"<b>⛏ МАЙНИНГ</b>\n\n⚡ Хешрейт: {u['mining_hs']:.1f} H/s\n💎 Доход: ~{(u['mining_hs']*(1.0/prices.get('BTC'))*3600):.0f} сат/час\n"
-    if income>0: txt += f"🕐 Намайнено: +{income:.0f} сат\n"
-    txt += f"\n💰 Баланс: {u['sat']:,.0f} сат\n\n<b>🛒 Купить ферму:</b>"
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🖥 GTX 1060 • 50 сат",callback_data="miner_1")
-    kb.button(text="🖥 RTX 3080 • 500 сат",callback_data="miner_2")
-    kb.button(text="🖥 RTX 4090 • 5000 сат",callback_data="miner_3")
-    kb.button(text="🏭 ASIC • 50000 сат",callback_data="miner_4")
-    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
-    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("miner_"))
-async def buy_miner(callback: CallbackQuery):
-    tier = int(callback.data.split("_")[1]); costs = {1:50,2:500,3:5000,4:50000}; hashes = {1:10,2:50,3:200,4:1000}
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if u['sat']<costs[tier]: await callback.answer(f"Нужно {costs[tier]} сат!",show_alert=True); return
-        old_hs = u['mining_hs']
-        await db.execute("UPDATE users SET sat=sat-?,mining_hs=mining_hs+?,last_mine=? WHERE tid=?",(costs[tier],hashes[tier],time.time(),uid))
-        await db.commit()
-        if old_hs==0: await give_ach(db,uid,"first_miner")
-        if old_hs+hashes[tier]>=1000: await give_ach(db,uid,"mining_1k")
-    await callback.answer(f"+{hashes[tier]} H/s!",show_alert=True)
-    await mining(callback)
-
-@dp.callback_query(F.data=="trade")
-async def trade(callback: CallbackQuery):
-    kb = InlineKeyboardBuilder()
-    for sym in ["BTC","ETH","LTC","DOGE","SOL","XRP","PEPE","SHIB","BONK"]:
-        pr = prices.get(sym); t = f"${pr:,.2f}" if pr>1 else f"${pr:.6f}"
-        kb.button(text=f"{sym} • {t}",callback_data=f"trade_{sym}")
-    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(2)
-    await callback.message.edit_text("<b>📈 ТРЕЙДИНГ</b>\n\nВыбери монету:",reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("trade_"))
-async def trade_coin(callback: CallbackQuery):
-    sym = callback.data.split("_")[1]; pr = prices.get(sym)
-    fmt = f"{pr:,.2f}" if pr>1 else f"{pr:.8f}"
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🟢 КУПИТЬ",callback_data=f"buy_{sym}")
-    kb.button(text="🔴 ПРОДАТЬ",callback_data=f"sell_{sym}")
-    kb.button(text="🔙 Назад",callback_data="trade"); kb.adjust(1)
-    await callback.message.edit_text(f"<b>📈 {sym}</b>\n\nЦена: <b>${fmt}</b>\n\nВыбери действие:",reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("buy_"))
-async def buy_coin_start(callback: CallbackQuery):
-    sym = callback.data.split("_")[1]
-    kb = InlineKeyboardBuilder()
-    kb.button(text="0.0001 BTC",callback_data=f"buy_do_{sym}_0.0001")
-    kb.button(text="0.001 BTC",callback_data=f"buy_do_{sym}_0.001")
-    kb.button(text="0.01 BTC",callback_data=f"buy_do_{sym}_0.01")
-    kb.button(text="🔙 Назад",callback_data=f"trade_{sym}"); kb.adjust(1)
-    await callback.message.edit_text(f"<b>КУПИТЬ {sym}</b>\n\nВыбери сумму в BTC:",reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("buy_do_"))
-async def buy_coin_do(callback: CallbackQuery):
-    parts = callback.data.split("_"); sym = parts[2]; cost_btc = float(parts[3])
-    uid = callback.from_user.id; pr = prices.get(sym); btc_pr = prices.get("BTC")
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if u['btc']<cost_btc: await callback.answer("Недостаточно BTC!",show_alert=True); return
-        amount = cost_btc*btc_pr/pr; col = sym.lower()
-        await db.execute(f"UPDATE users SET btc=btc-?,{col}={col}+? WHERE tid=?",(cost_btc,amount,uid))
-        if u['daily_date']==datetime.now().strftime('%Y%m%d'): await db.execute("UPDATE users SET daily_trade=1 WHERE tid=?",(uid,))
-        await db.commit()
-        await give_ach(db,uid,"first_trade")
-    await callback.answer(f"Куплено {amount:.4f} {sym}",show_alert=True)
-    await back(callback)
-
-@dp.callback_query(F.data.startswith("sell_"))
-async def sell_coin(callback: CallbackQuery):
-    sym = callback.data.split("_")[1]; uid = callback.from_user.id
-    pr = prices.get(sym); btc_pr = prices.get("BTC")
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        col = sym.lower(); amt = u.get(col,0)
-        if amt<=0: await callback.answer(f"Нет {sym}!",show_alert=True); return
-        btc_gain = amt*pr/btc_pr
-        await db.execute(f"UPDATE users SET btc=btc+?,{col}=0 WHERE tid=?",(btc_gain,uid))
-        await db.commit()
-    await callback.answer(f"Продано! +{btc_gain:.8f} BTC",show_alert=True)
-    await back(callback)
-
-@dp.callback_query(F.data=="futures")
-async def futures_menu(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        pos = await db.execute("SELECT * FROM positions WHERE tid=? AND status='open'",(uid,))
-        pos = await pos.fetchall()
-    txt = "<b>⚡ ФЬЮЧЕРСЫ</b>\n\n"
-    if pos:
-        txt += "<b>Открытые позиции:</b>\n"
-        for p in pos:
-            p = dict(p); cur = prices.get(p['symbol'])
-            pnl = (cur-p['entry'])/p['entry']*p['leverage']*100 if p['side']=='long' else (p['entry']-cur)/p['entry']*p['leverage']*100
-            em = "🟢" if pnl>=0 else "🔴"
-            txt += f"{em} {p['symbol']} {p['side'].upper()} {p['leverage']}x | PNL:{pnl:.1f}%\nВход:${p['entry']:.2f} Сейчас:${cur:.2f} Ликв:${p['liq']:.2f}\n"
-            txt += f"TP:${p['tp']:.2f} | SL:${p['sl']:.2f}\n"
-            kb = InlineKeyboardBuilder()
-            kb.button(text=f"❌ Закрыть {p['symbol']}",callback_data=f"close_pos_{p['id']}")
-            kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
-            await callback.message.edit_text(txt,reply_markup=kb.as_markup())
-            return
-    txt += "Нет открытых позиций.\n\n₿ Баланс: {u['btc']:.8f} BTC"
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🚀 Открыть позицию",callback_data="open_pos_start")
-    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
-    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data=="open_pos_start")
-async def open_pos_start(callback: CallbackQuery):
-    kb = InlineKeyboardBuilder()
-    for sym in ["BTC","ETH","DOGE","SOL","PEPE"]: kb.button(text=sym,callback_data=f"pos_sym_{sym}")
-    kb.button(text="🔙 Назад",callback_data="futures"); kb.adjust(2)
-    await callback.message.edit_text("<b>⚡ ОТКРЫТЬ ПОЗИЦИЮ</b>\n\nВыбери монету:",reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("pos_sym_"))
-async def pos_sym(callback: CallbackQuery):
-    sym = callback.data.split("_")[2]; pr = prices.get(sym)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🚀 LONG",callback_data=f"pos_side_{sym}_long")
-    kb.button(text="📉 SHORT",callback_data=f"pos_side_{sym}_short")
-    kb.button(text="🔙 Назад",callback_data="open_pos_start"); kb.adjust(1)
-    await callback.message.edit_text(f"<b>{sym}</b> • ${pr:,.2f}\n\nВыбери сторону:",reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("pos_side_"))
-async def pos_leverage(callback: CallbackQuery):
-    parts = callback.data.split("_"); sym = parts[2]; side = parts[3]
-    kb = InlineKeyboardBuilder()
-    for lev in [1,5,10,25,50,100]: kb.button(text=f"{lev}x",callback_data=f"pos_lev_{sym}_{side}_{lev}")
-    kb.button(text="🔙 Назад",callback_data=f"pos_sym_{sym}"); kb.adjust(3)
-    await callback.message.edit_text(f"<b>{sym} {side.upper()}</b>\n\nВыбери плечо:",reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("pos_lev_"))
-async def pos_confirm(callback: CallbackQuery):
-    parts = callback.data.split("_"); sym = parts[2]; side = parts[3]; leverage = int(parts[4])
-    pr = prices.get(sym); btc_pr = prices.get("BTC")
-    margin_btc = 0.001
-    amount = margin_btc*btc_pr*leverage/pr
-    liq = pr*(1-0.9/leverage) if side=='long' else pr*(1+0.9/leverage)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Подтвердить",callback_data=f"pos_do_{sym}_{side}_{leverage}_{amount:.4f}")
-    kb.button(text="❌ Отмена",callback_data="futures"); kb.adjust(1)
-    await callback.message.edit_text(
-        f"<b>⚡ ПОДТВЕРЖДЕНИЕ</b>\n\n{sym} {side.upper()} {leverage}x\n"
-        f"Вход: ${pr:.2f}\nМаржа: {margin_btc:.4f} BTC\n"
-        f"Ликвидация: ${liq:.2f}\nОбъём: ${amount*pr:.0f}",
-        reply_markup=kb.as_markup()
-    )
-
-@dp.callback_query(F.data.startswith("pos_do_"))
-async def pos_do(callback: CallbackQuery):
-    parts = callback.data.split("_"); sym = parts[2]; side = parts[3]; leverage = int(parts[4]); amount = float(parts[5])
-    uid = callback.from_user.id; pr = prices.get(sym); btc_pr = prices.get("BTC")
-    margin_btc = amount*pr/(leverage*btc_pr) if leverage>0 else 0.001
-    liq = pr*(1-0.9/leverage) if side=='long' else pr*(1+0.9/leverage)
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if u['btc']<margin_btc: await callback.answer("Недостаточно маржи!",show_alert=True); return
-        pid = secrets.token_hex(6)
-        await db.execute("UPDATE users SET btc=btc-? WHERE tid=?",(margin_btc,uid))
-        await db.execute(
-            "INSERT INTO positions (id,tid,symbol,side,amount,leverage,entry,liq,margin) VALUES (?,?,?,?,?,?,?,?,?)",
-            (pid,uid,sym,side,amount,leverage,pr,liq,margin_btc)
-        )
-        if u['daily_date']==datetime.now().strftime('%Y%m%d'): await db.execute("UPDATE users SET daily_futures=1 WHERE tid=?",(uid,))
-        await db.commit()
-        await give_ach(db,uid,"first_futures")
-    await callback.answer("Позиция открыта!",show_alert=True)
-    await futures_menu(callback)
-
-@dp.callback_query(F.data.startswith("close_pos_"))
-async def close_pos(callback: CallbackQuery):
-    pid = callback.data.split("_")[2]; uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        p = await db.execute("SELECT * FROM positions WHERE id=? AND tid=? AND status='open'",(pid,uid))
-        p = await p.fetchone()
-        if not p: await callback.answer("Позиция не найдена!",show_alert=True); return
-        p = dict(p); cur = prices.get(p['symbol']); entry = p['entry']; margin = p['margin']; leverage = p['leverage']
-        pnl = margin*(cur-entry)/entry*leverage if p['side']=='long' else margin*(entry-cur)/entry*leverage
-        new_btc = max(0,margin+pnl)
-        await db.execute("UPDATE users SET btc=btc+? WHERE tid=?",(new_btc,uid))
-        await db.execute("UPDATE positions SET status='closed',pnl=? WHERE id=?",(pnl,pid))
-        await db.commit()
-    await callback.answer(f"Закрыто! PnL: {pnl:.8f} BTC",show_alert=True)
-    await futures_menu(callback)
-
-@dp.callback_query(F.data=="business")
-async def business(callback: CallbackQuery):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        biz = await db.execute("SELECT * FROM businesses ORDER BY price DESC LIMIT 10")
-        biz = await biz.fetchall()
-    txt = "<b>🏢 БИЗНЕС</b>\n\n"
-    if biz:
-        for b in biz:
-            b = dict(b); sold = b['total_sh']-b['avail_sh']; cap = b['price']*b['total_sh']
-            txt += f"• <b>{b['ticker']}</b> — {b['name']}\n  Цена: {b['price']:.8f} BTC | Продано: {sold}/{b['total_sh']} | Кап: {cap:.4f} BTC\n\n"
-    else: txt += "Нет бизнесов.\n\n"
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🏗 Создать бизнес (0.5 BTC)",callback_data="create_biz")
-    if biz:
-        for b in biz: kb.button(text=f"Купить акции {b['ticker']}",callback_data=f"buy_shares_{b['id']}")
-    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
-    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data=="create_biz")
-async def create_biz(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if u['btc']<0.5: await callback.answer("Нужно 0.5 BTC!",show_alert=True); return
-        ticker = f"DEGEN{random.randint(100,999)}"; name = f"Degenerate {ticker}"
-        await db.execute("UPDATE users SET btc=btc-0.5 WHERE tid=?",(uid,))
-        await db.execute("INSERT INTO businesses (owner_id,name,ticker,price) VALUES (?,?,?,0.0001)",(uid,name,ticker))
-        await db.commit()
-        await give_ach(db,uid,"create_biz")
-    await callback.answer(f"Бизнес {ticker} создан!",show_alert=True)
-    await business(callback)
-
-@dp.callback_query(F.data.startswith("buy_shares_"))
-async def buy_shares(callback: CallbackQuery):
-    biz_id = int(callback.data.split("_")[2]); uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        b = await db.execute("SELECT * FROM businesses WHERE id=?",(biz_id,))
-        b = await b.fetchone()
-        if not b: await callback.answer("Бизнес не найден!",show_alert=True); return
-        b = dict(b)
-        if b['avail_sh']<=0: await callback.answer("Все акции проданы!",show_alert=True); return
-        u = await get_user(db,uid)
-        cost = b['price']
-        if u['btc']<cost: await callback.answer(f"Нужно {cost:.8f} BTC!",show_alert=True); return
-        await db.execute("UPDATE users SET btc=btc-? WHERE tid=?",(cost,uid))
-        await db.execute("UPDATE businesses SET avail_sh=avail_sh-1,price=price*1.01 WHERE id=?",(biz_id,))
-        existing = await db.execute("SELECT shares FROM biz_shares WHERE holder_id=? AND biz_id=?",(uid,biz_id))
-        existing = await existing.fetchone()
-        if existing: await db.execute("UPDATE biz_shares SET shares=shares+1 WHERE holder_id=? AND biz_id=?",(uid,biz_id))
-        else: await db.execute("INSERT INTO biz_shares (holder_id,biz_id,shares) VALUES (?,?,1)",(uid,biz_id))
-        owned = await db.execute("SELECT SUM(shares) as s FROM biz_shares WHERE biz_id=? AND holder_id=?",(biz_id,uid))
-        owned = await owned.fetchone()
-        if owned and owned[0]>=b['total_sh']*0.51 and b['owner_id']!=uid:
-            await db.execute("UPDATE businesses SET owner_id=? WHERE id=?",(uid,biz_id))
-            await db.execute("DELETE FROM biz_shares WHERE holder_id=? AND biz_id=?",(b['owner_id'],biz_id))
-            await give_ach(db,uid,"raid_biz")
-        await db.commit()
-    await callback.answer(f"Акция {b['ticker']} куплена!",show_alert=True)
-    await business(callback)
-
-@dp.callback_query(F.data=="bp")
-async def bp_menu(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        bp = await db.execute("SELECT * FROM bp WHERE tid=?",(uid,))
-        bp = await bp.fetchone(); bp = dict(bp) if bp else {'level':1,'xp':0,'premium':0}
-    txt = f"<b>💀 БАТЛ-ПАСС</b>\n\nУровень: <b>{bp['level']}</b>\nXP: {bp['xp']}/{bp['level']*100}\nСтатус: {'👑 Премиум' if bp['premium'] else '🆓 Бесплатный'}\n\n<b>Награды:</b>\nУр.5: +10% тапы\nУр.10: +1000 сат\nУр.15: +20% майнинг\nУр.20: 👑 Скин"
-    kb = InlineKeyboardBuilder()
-    if not bp['premium']: kb.button(text="👑 Премиум (0.01 BTC)",callback_data="buy_premium")
-    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
-    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data=="buy_premium")
-async def buy_premium(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if u['btc']<0.01: await callback.answer("Нужно 0.01 BTC!",show_alert=True); return
-        await db.execute("UPDATE users SET btc=btc-0.01 WHERE tid=?",(uid,))
-        await db.execute("UPDATE bp SET premium=1 WHERE tid=?",(uid,))
-        await db.commit(); await give_ach(db,uid,"premium_bp")
-    await callback.answer("Премиум 👑",show_alert=True)
-    await bp_menu(callback)
-
-@dp.callback_query(F.data=="wheel")
-async def wheel(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid); now = time.time()
-        if now-u['wheel_time']<43200:
-            rem = 43200-(now-u['wheel_time']); hrs = int(rem//3600); mins = int((rem%3600)//60)
-            await callback.answer(f"Доступно через {hrs}ч {mins}мин",show_alert=True); return
-        prizes = [("100 сат",100,"sat",30),("500 сат",500,"sat",25),("1000 сат",1000,"sat",15),
-                  ("0.0001 BTC",0.0001,"btc",10),("x2 тапы 1ч",0,"boost",8),("x2 майнинг 30м",0,"boost2",5),
-                  ("0.001 BTC",0.001,"btc",2),("Пустышка 💨",0,"none",5)]
-        r = random.randint(1,sum(p[3] for p in prizes)); cum = 0; prize = prizes[0]
-        for p in prizes:
-            cum += p[3]
-            if r<=cum: prize = p; break
-        if prize[2]=="sat": await db.execute("UPDATE users SET sat=sat+?,wheel_time=? WHERE tid=?",(prize[1],now,uid))
-        elif prize[2]=="btc": await db.execute("UPDATE users SET btc=btc+?,wheel_time=? WHERE tid=?",(prize[1],now,uid))
-        else: await db.execute("UPDATE users SET wheel_time=? WHERE tid=?",(now,uid))
-        await db.commit()
-    await callback.message.edit_text(f"<b>🎡 КОЛЕСО ФОРТУНЫ</b>\n\n🎰 Крутим...\n\n✨ Выпало: <b>{prize[0]}</b>!\n\n<i>Следующий раз через 12ч</i>",reply_markup=back_btn())
-
-@dp.callback_query(F.data=="daily")
-async def daily(callback: CallbackQuery):
-    uid = callback.from_user.id; today = datetime.now().strftime('%Y%m%d')
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if u['daily_date']!=today:
-            await db.execute("UPDATE users SET daily_date=?,daily_tap=0,daily_trade=0,daily_futures=0,daily_noliq=0 WHERE tid=?",(today,uid))
-            await db.commit(); u = await get_user(db,uid)
-        tap_done = u['daily_tap']>=100; trade_done = u['daily_trade']>=1; futures_done = u['daily_futures']>=1; noliq_done = u['daily_noliq']>=1
-        all_done = tap_done and trade_done and futures_done and noliq_done
-        if all_done and u['daily_date']==today:
-            if not await db.execute("SELECT 1 FROM ach WHERE tid=? AND ach_id='daily_all'",(uid,)).fetchone():
-                await db.execute("UPDATE users SET lootboxes=lootboxes+1 WHERE tid=?",(uid,))
-                await db.commit()
-    txt = "<b>📋 ЕЖЕДНЕВНЫЕ ЗАДАНИЯ</b>\n\n"
-    txt += f"{'✅' if tap_done else '🔲'} 100 тапов ({u['daily_tap']}/100): +50 сат\n"
-    txt += f"{'✅' if trade_done else '🔲'} Купить монету: +100 сат\n"
-    txt += f"{'✅' if futures_done else '🔲'} Открыть фьючерс: +200 сат\n"
-    txt += f"{'✅' if noliq_done else '🔲'} Не ликвидироваться: +150 сат\n"
-    txt += f"\n{'🎁 Все выполнено! Лутбокс получен!' if all_done else 'Выполни все — лутбокс!'}"
-    await callback.message.edit_text(txt,reply_markup=back_btn())
-
-@dp.callback_query(F.data=="staking")
-async def staking_menu(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-    now = time.time(); staked_sat = u['staked_sat']>0 and u['stake_end']>now; staked_btc = u['staked_btc']>0 and u['stake_btc_end']>now
-    txt = "<b>🏦 СТЕЙКИНГ</b>\n\n"
-    if staked_sat:
-        rem = u['stake_end']-now; txt += f"🔒 Сатоши: {u['staked_sat']:,.0f}\n⏳ Осталось: {int(rem//3600)}ч {int((rem%3600)//60)}м\n\n"
-    elif staked_btc:
-        rem = u['stake_btc_end']-now; txt += f"🔒 BTC: {u['staked_btc']:.8f}\n⏳ Осталось: {int(rem//3600)}ч {int((rem%3600)//60)}м\n\n"
-    else: txt += "Нет активных стейкингов.\n\n"
-    txt += "<b>Ставки:</b>\n1ч — 0.3% | 6ч — 2.5%\n24ч — 12% | 72ч — 45%"
-    kb = InlineKeyboardBuilder()
-    if not staked_sat and not staked_btc:
-        kb.button(text="🔒 Застейкать сатоши",callback_data="stake_sat_start")
-        kb.button(text="🔒 Застейкать BTC",callback_data="stake_btc_start")
-    elif staked_sat and u['stake_end']<=now: kb.button(text="💰 Забрать сатоши",callback_data="claim_stake_sat")
-    elif staked_btc and u['stake_btc_end']<=now: kb.button(text="💰 Забрать BTC",callback_data="claim_stake_btc")
-    else: kb.button(text="🔓 Снять досрочно (-15%)",callback_data="unstake_all")
-    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
-    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data=="stake_sat_start")
-async def stake_sat_start(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-    kb = InlineKeyboardBuilder()
-    for amt in [100,500,1000,5000,10000]:
-        if u['sat']>=amt: kb.button(text=f"{amt:,} сат",callback_data=f"stake_sat_amt_{amt}")
-    kb.button(text="Всё",callback_data=f"stake_sat_amt_{int(u['sat'])}")
-    kb.button(text="🔙 Назад",callback_data="staking"); kb.adjust(2)
-    await callback.message.edit_text(f"<b>🔒 СТЕЙКИНГ САТОШИ</b>\n\n💰 Доступно: {u['sat']:,.0f} сат\n\n<b>Выбери сумму:</b>",reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("stake_sat_amt_"))
-async def stake_sat_amt(callback: CallbackQuery):
-    amt = float(callback.data.split("_")[3]); uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if amt>u['sat']: await callback.answer("Недостаточно!",show_alert=True); return
-    kb = InlineKeyboardBuilder()
-    for h in [1,6,24,72]: kb.button(text=f"{h}ч ({STAKING_RATES[h]*100}%)",callback_data=f"stake_sat_do_{amt}_{h}")
-    kb.button(text="🔙 Назад",callback_data="stake_sat_start"); kb.adjust(2)
-    await callback.message.edit_text(f"<b>Сумма: {amt:,.0f} сат</b>\n\nВыбери срок:",reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("stake_sat_do_"))
-async def stake_sat_do(callback: CallbackQuery):
-    parts = callback.data.split("_"); amt = float(parts[3]); hours = int(parts[4]); uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if u['staked_sat']>0 or u['staked_btc']>0: await callback.answer("Уже есть стейкинг!",show_alert=True); return
-        if amt>u['sat']: await callback.answer("Недостаточно!",show_alert=True); return
-        await db.execute("UPDATE users SET sat=sat-?,staked_sat=?,stake_end=? WHERE tid=?",(amt,amt,time.time()+hours*3600,uid))
-        await db.commit()
-    rate = STAKING_RATES[hours]*100
-    await callback.message.edit_text(f"<b>🔒 ЗАСТЕЙКАНО!</b>\n\n💰 {amt:,.0f} сат\n⏳ {hours}ч\n📈 +{rate}%\n💎 Будет: {amt*(1+STAKING_RATES[hours]):,.0f} сат\n\n<i>Штраф за досрочное: 15%</i>",reply_markup=back_btn())
-
-@dp.callback_query(F.data=="stake_btc_start")
-async def stake_btc_start(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-    kb = InlineKeyboardBuilder()
-    for amt in [0.0001,0.0005,0.001,0.005,0.01]:
-        if u['btc']>=amt: kb.button(text=f"{amt:.4f} BTC",callback_data=f"stake_btc_amt_{amt}")
-    kb.button(text="Всё",callback_data=f"stake_btc_amt_{u['btc']}")
-    kb.button(text="🔙 Назад",callback_data="staking"); kb.adjust(2)
-    await callback.message.edit_text(f"<b>🔒 СТЕЙКИНГ BTC</b>\n\n₿ Доступно: {u['btc']:.8f} BTC\n\n<b>Выбери сумму:</b>",reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("stake_btc_amt_"))
-async def stake_btc_amt(callback: CallbackQuery):
-    amt = float(callback.data.split("_")[3]); uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if amt>u['btc']: await callback.answer("Недостаточно!",show_alert=True); return
-    kb = InlineKeyboardBuilder()
-    for h in [1,6,24,72]: kb.button(text=f"{h}ч ({STAKING_RATES[h]*100}%)",callback_data=f"stake_btc_do_{amt}_{h}")
-    kb.button(text="🔙 Назад",callback_data="stake_btc_start"); kb.adjust(2)
-    await callback.message.edit_text(f"<b>Сумма: {amt:.8f} BTC</b>\n\nВыбери срок:",reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("stake_btc_do_"))
-async def stake_btc_do(callback: CallbackQuery):
-    parts = callback.data.split("_"); amt = float(parts[3]); hours = int(parts[4]); uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if u['staked_sat']>0 or u['staked_btc']>0: await callback.answer("Уже есть стейкинг!",show_alert=True); return
-        if amt>u['btc']: await callback.answer("Недостаточно!",show_alert=True); return
-        await db.execute("UPDATE users SET btc=btc-?,staked_btc=?,stake_btc_end=? WHERE tid=?",(amt,amt,time.time()+hours*3600,uid))
-        await db.commit()
-    rate = STAKING_RATES[hours]*100
-    await callback.message.edit_text(f"<b>🔒 ЗАСТЕЙКАНО!</b>\n\n₿ {amt:.8f} BTC\n⏳ {hours}ч\n📈 +{rate}%\n💎 Будет: {amt*(1+STAKING_RATES[hours]):.8f} BTC\n\n<i>Штраф за досрочное: 15%</i>",reply_markup=back_btn())
-
-@dp.callback_query(F.data=="claim_stake_sat")
-async def claim_stake_sat(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if u['staked_sat']<=0 or u['stake_end']>time.time(): await callback.answer("Ещё рано!",show_alert=True); return
-        elapsed = time.time()-(u['stake_end']-3600); rate_key = 24
-        for h in [72,24,6,1]:
-            if elapsed>=h*3600*0.9: rate_key = h; break
-        rate = STAKING_RATES.get(rate_key,0.12); reward = u['staked_sat']*rate; total = u['staked_sat']+reward
-        await db.execute("UPDATE users SET sat=sat+?,staked_sat=0,stake_end=0 WHERE tid=?",(total,uid))
-        await db.commit()
-    await callback.message.edit_text(f"<b>💰 СТЕЙКИНГ ЗАВЕРШЁН!</b>\n\n💎 +{u['staked_sat']:,.0f} сат\n📈 +{reward:,.0f} сат\n💰 Итого: {total:,.0f} сат",reply_markup=back_btn())
-
-@dp.callback_query(F.data=="claim_stake_btc")
-async def claim_stake_btc(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if u['staked_btc']<=0 or u['stake_btc_end']>time.time(): await callback.answer("Ещё рано!",show_alert=True); return
-        elapsed = time.time()-(u['stake_btc_end']-3600); rate_key = 24
-        for h in [72,24,6,1]:
-            if elapsed>=h*3600*0.9: rate_key = h; break
-        rate = STAKING_RATES.get(rate_key,0.12); reward = u['staked_btc']*rate; total = u['staked_btc']+reward
-        await db.execute("UPDATE users SET btc=btc+?,staked_btc=0,stake_btc_end=0 WHERE tid=?",(total,uid))
-        await db.commit()
-    await callback.message.edit_text(f"<b>💰 СТЕЙКИНГ ЗАВЕРШЁН!</b>\n\n₿ +{u['staked_btc']:.8f} BTC\n📈 +{reward:.8f} BTC\n₿ Итого: {total:.8f} BTC",reply_markup=back_btn())
-
-@dp.callback_query(F.data=="unstake_all")
-async def unstake_all(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if u['staked_sat']>0:
-            penalty = u['staked_sat']*0.15; ret = u['staked_sat']-penalty
-            await db.execute("UPDATE users SET sat=sat+?,staked_sat=0,stake_end=0 WHERE tid=?",(ret,uid))
-            await db.commit()
-            await callback.message.edit_text(f"<b>🔓 ДОСРОЧНО</b>\n\n💰 +{ret:,.0f} сат\n💸 Штраф: -{penalty:,.0f} (15%)",reply_markup=back_btn())
-        elif u['staked_btc']>0:
-            penalty = u['staked_btc']*0.15; ret = u['staked_btc']-penalty
-            await db.execute("UPDATE users SET btc=btc+?,staked_btc=0,stake_btc_end=0 WHERE tid=?",(ret,uid))
-            await db.commit()
-            await callback.message.edit_text(f"<b>🔓 ДОСРОЧНО</b>\n\n₿ +{ret:.8f} BTC\n💸 Штраф: -{penalty:.8f} (15%)",reply_markup=back_btn())
-        else: await callback.answer("Нет стейкинга!",show_alert=True)
-
-@dp.callback_query(F.data=="lootbox")
-async def lootbox_menu(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-    kb = InlineKeyboardBuilder()
-    if u['lootboxes']>0: kb.button(text="🎁 Открыть!",callback_data="open_lootbox")
-    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
-    await callback.message.edit_text(f"<b>🎁 ЛУТБОКСЫ</b>\n\n📦 В наличии: {u['lootboxes']} шт.\n\n<i>Получи за выполнение всех заданий дня!</i>",reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data=="open_lootbox")
-async def open_lootbox(callback: CallbackQuery):
-    uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if u['lootboxes']<=0: await callback.answer("Нет лутбоксов!",show_alert=True); return
-        r = random.random()
-        if r<0.6: reward = f"{random.randint(100,500)} сат"; amt = int(reward.split()[0]); await db.execute("UPDATE users SET sat=sat+?,lootboxes=lootboxes-1 WHERE tid=?",(amt,uid))
-        elif r<0.9: reward = f"{random.randint(1000,5000)} сат"; amt = int(reward.split()[0]); await db.execute("UPDATE users SET sat=sat+?,lootboxes=lootboxes-1 WHERE tid=?",(amt,uid))
-        else: btc_amt = random.uniform(0.005,0.01); reward = f"{btc_amt:.6f} BTC"; await db.execute("UPDATE users SET btc=btc+?,lootboxes=lootboxes-1 WHERE tid=?",(btc_amt,uid))
-        await db.commit()
-    await callback.message.edit_text(f"<b>🎁 ЛУТБОКС</b>\n\n📦 Открываем...\n\n✨ <b>{reward}</b>!\n\nОсталось: {u['lootboxes']-1}",reply_markup=back_btn())
-
-@dp.callback_query(F.data=="duel")
-async def duel_menu(callback: CallbackQuery):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        duels = await db.execute("SELECT * FROM duels WHERE status='open' LIMIT 5"); duels = await duels.fetchall()
-    txt = "<b>⚔️ ДУЭЛИ</b>\n\n"
-    if duels:
-        txt += "<b>Активные вызовы:</b>\n"
-        for d in duels:
-            d = dict(d)
-            txt += f"• ID{d['id']}: {d['amount']:,.0f} сат | {d['dtype']}\n"
-    else: txt += "Нет активных вызовов.\n"
-    txt += "\n<b>Создать дуэль:</b>"
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🎲 Кубик",callback_data="duel_new_dice")
-    kb.button(text="🪙 Орёл/Решка",callback_data="duel_new_coin")
-    kb.button(text="🏀 Баскетбол",callback_data="duel_new_basket")
-    kb.button(text="🎯 Дартс",callback_data="duel_new_darts")
-    kb.button(text="🎰 Слоты",callback_data="duel_new_slots")
-    kb.button(text="🏆 Рейтинг",callback_data="duel_rating")
-    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
-    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data=="duel_rating")
-async def duel_rating(callback: CallbackQuery):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        top = await db.execute("SELECT username,duel_wins,duel_losses FROM users WHERE duel_wins>0 ORDER BY duel_wins DESC LIMIT 10")
-        top = await top.fetchall()
-    txt = "<b>🏆 РЕЙТИНГ ДУЭЛЯНТОВ</b>\n\n"
-    for i,u in enumerate(top):
-        u = dict(u); wr = f"{u['duel_wins']/(u['duel_wins']+u['duel_losses'])*100:.0f}%" if (u['duel_wins']+u['duel_losses'])>0 else "—"
-        txt += f"{i+1}. {u['username']}: {u['duel_wins']}W/{u['duel_losses']}L ({wr})\n"
-    await callback.message.edit_text(txt,reply_markup=back_btn())
-
-@dp.callback_query(F.data.startswith("duel_new_"))
-async def duel_new(callback: CallbackQuery):
-    dtype = callback.data.split("_")[2]; uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-    kb = InlineKeyboardBuilder()
-    for amt in [100,500,1000,5000,10000]:
-        if u['sat']>=amt: kb.button(text=f"{amt:,} сат",callback_data=f"duel_create_{dtype}_{amt}")
-    kb.button(text="🔙 Назад",callback_data="duel"); kb.adjust(2)
-    await callback.message.edit_text(f"<b>Создать дуэль: {dtype.upper()}</b>\n\nВыбери ставку:",reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("duel_create_"))
-async def duel_create(callback: CallbackQuery):
-    parts = callback.data.split("_"); dtype = parts[2]; amt = float(parts[3]); uid = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
-        if u['sat']<amt: await callback.answer("Недостаточно сатоши!",show_alert=True); return
-        await db.execute("INSERT INTO duels (creator_id,amount,dtype,status) VALUES (?,?,?,'open')",(uid,amt,dtype))
-        await db.commit()
-        d = await db.execute("SELECT id FROM duels WHERE creator_id=? AND status='open' ORDER BY id DESC LIMIT 1",(uid,))
-        d = await d.fetchone()
-        did = d[0] if d else 0
-    await callback.message.edit_text(
-        f"<b>⚔️ ДУЭЛЬ СОЗДАНА!</b>\n\nТип: {dtype}\nСтавка: {amt:,.0f} сат\nID: {did}\n\n"
-        f"<i>Противник может принять вызов командой:</i>\n<code>/accept {did}</code>",
-        reply_markup=back_btn()
-    )
-
+# ===== /accept =====
 @dp.message(Command("accept"))
 async def accept_duel(message: Message):
     args = message.text.split()
@@ -909,7 +269,7 @@ async def accept_duel(message: Message):
     emoji_map = {"dice":"🎲","coin":"🎲","basket":"🏀","darts":"🎯","slots":"🎰"}
     emoji = emoji_map.get(dtype,"🎲")
     
-    sent = await bot.send_message(message.chat.id,f"<b>⚔️ ДУЭЛЬ!</b>\n\n🎲 Бросаем {emoji}...")
+    await bot.send_message(message.chat.id,f"<b>⚔️ ДУЭЛЬ!</b>\n\n🎲 Бросаем {emoji}...")
     
     v1 = 0; v2 = 0
     if dtype == "dice":
@@ -955,6 +315,697 @@ async def accept_duel(message: Message):
     else:
         await message.answer(f"<b>🤝 НИЧЬЯ!</b>\n\n{v1} vs {v2}\nСтавки возвращены.")
 
+# ===== back =====
+@dp.callback_query(F.data=="back")
+async def back(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        u = await get_user(db,uid)
+        bv = calc_btc(u)
+        rank = calc_rank(bv)
+    txt = f"<b>💀 DEGEN EMPIRE</b>\n\n🏷 {RANK_EMOJI.get(rank,'')} {rank} | 💰 {u['sat']:,.0f} сат\n₿ BTC: <b>${prices.get('BTC'):,.0f}</b>\n\n<b>Выбирай действие:</b>"
+    await callback.message.edit_text(txt,reply_markup=main_menu())
+
+# ===== rates =====
+@dp.callback_query(F.data=="rates")
+async def rates(callback: CallbackQuery):
+    await prices.fetch()
+    txt = "<b>💱 КУРСЫ (Binance/CoinGecko)</b>\n\n"
+    for sym in ["BTC","ETH","LTC","DOGE","SOL","XRP","PEPE","SHIB","BONK"]:
+        pr = prices.get(sym); ch = prices.changes.get(sym,0)
+        sgn = "+" if ch>=0 else ""; em = "📈" if ch>=0 else "📉"
+        fmt = f"{pr:,.2f}" if pr>1 else f"{pr:.8f}"
+        txt += f"{em} <b>{sym}</b>: ${fmt} ({sgn}{ch:.2f}%)\n"
+    txt += f"\n<i>Обновлено: {datetime.now().strftime('%H:%M:%S')}</i>"
+    await callback.message.edit_text(txt,reply_markup=back_btn())
+
+# ===== profile =====
+@dp.callback_query(F.data=="profile")
+async def profile(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        u = await get_user(db,uid)
+        bv = calc_btc(u)
+        rank = calc_rank(bv)
+        duels = f"{u['duel_wins']}W/{u['duel_losses']}L"
+        wr = f"{u['duel_wins']/(u['duel_wins']+u['duel_losses'])*100:.0f}%" if (u['duel_wins']+u['duel_losses'])>0 else "—"
+        ach_cnt = await db.execute("SELECT COUNT(*) as c FROM ach WHERE tid=?",(uid,))
+        ach_cnt = await ach_cnt.fetchone()
+        now = time.time()
+        stake_info = ""
+        if u['staked_sat']>0 and u['stake_end']>now:
+            rem = u['stake_end']-now
+            stake_info += f"🔒 Сатоши: {u['staked_sat']:,.0f} (ещё {int(rem//3600)}ч)\n"
+        if u['staked_btc']>0 and u['stake_btc_end']>now:
+            rem = u['stake_btc_end']-now
+            stake_info += f"🔒 BTC: {u['staked_btc']:.8f} (ещё {int(rem//3600)}ч)\n"
+    txt = f"<b>👤 ПРОФИЛЬ</b>\n\n🏷 {RANK_EMOJI.get(rank,'')} <b>{rank}</b>\n💰 Сатоши: {u['sat']:,.0f}\n₿ BTC: {u['btc']:.8f}\n"
+    txt += f"💎 Капитал: {bv:.4f} BTC (${bv*prices.get('BTC'):,.0f})\n🖐 Тапов: {u['total_taps']:,}\n⛏ Хешрейт: {u['mining_hs']:.1f} H/s\n"
+    txt += f"⚔️ Дуэли: {duels} ({wr})\n🏆 Достижений: {ach_cnt['c']}\n🎁 Лутбоксов: {u['lootboxes']}\n"
+    if stake_info: txt += f"\n{stake_info}"
+    txt += f"\n🔗 Реф-код: <code>{u['ref_code']}</code>"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🏆 Достижения",callback_data="ach_list")
+    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
+    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
+
+# ===== ach_list =====
+@dp.callback_query(F.data=="ach_list")
+async def ach_list(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        e = await db.execute("SELECT ach_id FROM ach WHERE tid=?",(uid,))
+        e = await e.fetchall(); ids = [x['ach_id'] for x in e]
+    txt = "<b>🏆 ДОСТИЖЕНИЯ</b>\n\n"
+    for aid,info in ACH.items():
+        done = "✅" if aid in ids else "🔒"
+        txt += f"{done} {info['n']} +{info['r']} сат\n"
+    await callback.message.edit_text(txt,reply_markup=back_btn())
+
+# ===== tap =====
+@dp.callback_query(F.data=="tap")
+async def tap(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        u = await get_user(db,uid)
+        bv = calc_btc(u); rank = calc_rank(bv)
+        bonus = {"Нищий":1.05,"Барыга":1.1,"Майнер":1.15,"Кит":1.2,"Мегакит":1.3,"Деген":1.3}.get(rank,1.0)
+        reward = u['tap_power']*bonus*(1+u['multi_tap']*0.25)
+        new_sat = u['sat']+reward; new_taps = u['total_taps']+1
+        await db.execute("UPDATE users SET sat=?,total_taps=? WHERE tid=?",(new_sat,new_taps,uid))
+        if u['ref_by']: await db.execute("UPDATE users SET sat=sat+? WHERE tid=?",(reward*0.05,u['ref_by']))
+        await add_xp(db,uid,1)
+        if u['daily_date']==datetime.now().strftime('%Y%m%d'): await db.execute("UPDATE users SET daily_tap=daily_tap+1 WHERE tid=?",(uid,))
+        await db.commit()
+        if new_taps==1: await give_ach(db,uid,"first_tap")
+        if new_taps>=1000: await give_ach(db,uid,"tap_1000")
+        if new_taps>=100000: await give_ach(db,uid,"tap_100k")
+    txt = f"<b>🖐 ТАП!</b>\n\n💎 +{reward:.1f} сат\n💰 Баланс: {new_sat:,.0f} сат\n👆 Тапов: {new_taps:,}\n⚡ Сила: x{bonus:.2f}"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🖐 Тапнуть ещё!",callback_data="tap")
+    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
+    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
+
+# ===== mining =====
+@dp.callback_query(F.data=="mining")
+async def mining(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        u = await get_user(db,uid)
+        now = time.time(); elapsed = now-u['last_mine'] if u['last_mine']>0 else 0
+        income = u['mining_hs']*(1.0/prices.get("BTC"))*elapsed
+        if income>0: await db.execute("UPDATE users SET sat=sat+?,last_mine=? WHERE tid=?",(income,now,uid)); await db.commit(); u = await get_user(db,uid)
+    txt = f"<b>⛏ МАЙНИНГ</b>\n\n⚡ Хешрейт: {u['mining_hs']:.1f} H/s\n💎 Доход: ~{(u['mining_hs']*(1.0/prices.get('BTC'))*3600):.0f} сат/час\n"
+    if income>0: txt += f"🕐 Намайнено: +{income:.0f} сат\n"
+    txt += f"\n💰 Баланс: {u['sat']:,.0f} сат\n\n<b>🛒 Купить ферму:</b>"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🖥 GTX 1060 • 50 сат",callback_data="miner_1")
+    kb.button(text="🖥 RTX 3080 • 500 сат",callback_data="miner_2")
+    kb.button(text="🖥 RTX 4090 • 5000 сат",callback_data="miner_3")
+    kb.button(text="🏭 ASIC • 50000 сат",callback_data="miner_4")
+    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
+    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
+
+# ===== buy miner =====
+@dp.callback_query(F.data.startswith("miner_"))
+async def buy_miner(callback: CallbackQuery):
+    tier = int(callback.data.split("_")[1]); costs = {1:50,2:500,3:5000,4:50000}; hashes = {1:10,2:50,3:200,4:1000}
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if u['sat']<costs[tier]: await callback.answer(f"Нужно {costs[tier]} сат!",show_alert=True); return
+        old_hs = u['mining_hs']
+        await db.execute("UPDATE users SET sat=sat-?,mining_hs=mining_hs+?,last_mine=? WHERE tid=?",(costs[tier],hashes[tier],time.time(),uid))
+        await db.commit()
+        if old_hs==0: await give_ach(db,uid,"first_miner")
+        if old_hs+hashes[tier]>=1000: await give_ach(db,uid,"mining_1k")
+    await callback.answer(f"+{hashes[tier]} H/s!",show_alert=True)
+    await mining(callback)
+
+# ===== trade =====
+@dp.callback_query(F.data=="trade")
+async def trade(callback: CallbackQuery):
+    kb = InlineKeyboardBuilder()
+    for sym in ["BTC","ETH","LTC","DOGE","SOL","XRP","PEPE","SHIB","BONK"]:
+        pr = prices.get(sym); t = f"${pr:,.2f}" if pr>1 else f"${pr:.6f}"
+        kb.button(text=f"{sym} • {t}",callback_data=f"tcoin_{sym}")
+    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(2)
+    await callback.message.edit_text("<b>📈 ТРЕЙДИНГ</b>\n\nВыбери монету:",reply_markup=kb.as_markup())
+
+# ===== trade coin =====
+@dp.callback_query(F.data.startswith("tcoin_"))
+async def trade_coin(callback: CallbackQuery):
+    sym = callback.data.split("_")[1]; pr = prices.get(sym)
+    fmt = f"{pr:,.2f}" if pr>1 else f"{pr:.8f}"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🟢 КУПИТЬ",callback_data=f"tbuy_{sym}")
+    kb.button(text="🔴 ПРОДАТЬ",callback_data=f"tsell_{sym}")
+    kb.button(text="🔙 Назад",callback_data="trade"); kb.adjust(1)
+    await callback.message.edit_text(f"<b>📈 {sym}</b>\n\nЦена: <b>${fmt}</b>\n\nВыбери действие:",reply_markup=kb.as_markup())
+
+# ===== buy coin start =====
+@dp.callback_query(F.data.startswith("tbuy_"))
+async def buy_coin_start(callback: CallbackQuery):
+    sym = callback.data.split("_")[1]
+    kb = InlineKeyboardBuilder()
+    kb.button(text="0.0001 BTC",callback_data=f"tbuy_do_{sym}_0.0001")
+    kb.button(text="0.001 BTC",callback_data=f"tbuy_do_{sym}_0.001")
+    kb.button(text="0.01 BTC",callback_data=f"tbuy_do_{sym}_0.01")
+    kb.button(text="🔙 Назад",callback_data=f"tcoin_{sym}"); kb.adjust(1)
+    await callback.message.edit_text(f"<b>КУПИТЬ {sym}</b>\n\nВыбери сумму в BTC:",reply_markup=kb.as_markup())
+
+# ===== buy coin do =====
+@dp.callback_query(F.data.startswith("tbuy_do_"))
+async def buy_coin_do(callback: CallbackQuery):
+    parts = callback.data.split("_"); sym = parts[2]; cost_btc = float(parts[3])
+    uid = callback.from_user.id; pr = prices.get(sym); btc_pr = prices.get("BTC")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if u['btc']<cost_btc: await callback.answer("Недостаточно BTC!",show_alert=True); return
+        amount = cost_btc*btc_pr/pr; col = sym.lower()
+        await db.execute(f"UPDATE users SET btc=btc-?,{col}={col}+? WHERE tid=?",(cost_btc,amount,uid))
+        if u['daily_date']==datetime.now().strftime('%Y%m%d'): await db.execute("UPDATE users SET daily_trade=1 WHERE tid=?",(uid,))
+        await db.commit()
+        await give_ach(db,uid,"first_trade")
+    await callback.answer(f"Куплено {amount:.4f} {sym}",show_alert=True)
+    await back(callback)
+
+# ===== sell coin =====
+@dp.callback_query(F.data.startswith("tsell_"))
+async def sell_coin(callback: CallbackQuery):
+    sym = callback.data.split("_")[1]; uid = callback.from_user.id
+    pr = prices.get(sym); btc_pr = prices.get("BTC")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        col = sym.lower(); amt = u.get(col,0)
+        if amt<=0: await callback.answer(f"Нет {sym}!",show_alert=True); return
+        btc_gain = amt*pr/btc_pr
+        await db.execute(f"UPDATE users SET btc=btc+?,{col}=0 WHERE tid=?",(btc_gain,uid))
+        await db.commit()
+    await callback.answer(f"Продано! +{btc_gain:.8f} BTC",show_alert=True)
+    await back(callback)
+
+# ===== futures =====
+@dp.callback_query(F.data=="futures")
+async def futures_menu(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        pos = await db.execute("SELECT * FROM positions WHERE tid=? AND status='open'",(uid,))
+        pos = await pos.fetchall()
+    txt = "<b>⚡ ФЬЮЧЕРСЫ</b>\n\n"
+    if pos:
+        txt += "<b>Открытые позиции:</b>\n"
+        for p in pos:
+            p = dict(p); cur = prices.get(p['symbol'])
+            pnl = (cur-p['entry'])/p['entry']*p['leverage']*100 if p['side']=='long' else (p['entry']-cur)/p['entry']*p['leverage']*100
+            em = "🟢" if pnl>=0 else "🔴"
+            txt += f"{em} {p['symbol']} {p['side'].upper()} {p['leverage']}x | PNL:{pnl:.1f}%\nВход:${p['entry']:.2f} Сейчас:${cur:.2f} Ликв:${p['liq']:.2f}\n"
+            txt += f"TP:${p['tp']:.2f} | SL:${p['sl']:.2f}\n"
+        kb = InlineKeyboardBuilder()
+        for p in pos:
+            kb.button(text=f"❌ Закрыть {p['symbol']}",callback_data=f"close_pos_{p['id']}")
+        kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
+        await callback.message.edit_text(txt,reply_markup=kb.as_markup())
+        return
+    txt += f"Нет открытых позиций.\n\n₿ Баланс: {u['btc']:.8f} BTC"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🚀 Открыть позицию",callback_data="open_pos_start")
+    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
+    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
+
+# ===== open pos start =====
+@dp.callback_query(F.data=="open_pos_start")
+async def open_pos_start(callback: CallbackQuery):
+    kb = InlineKeyboardBuilder()
+    for sym in ["BTC","ETH","DOGE","SOL","PEPE"]: kb.button(text=sym,callback_data=f"pos_sym_{sym}")
+    kb.button(text="🔙 Назад",callback_data="futures"); kb.adjust(2)
+    await callback.message.edit_text("<b>⚡ ОТКРЫТЬ ПОЗИЦИЮ</b>\n\nВыбери монету:",reply_markup=kb.as_markup())
+
+# ===== pos sym =====
+@dp.callback_query(F.data.startswith("pos_sym_"))
+async def pos_sym(callback: CallbackQuery):
+    sym = callback.data.split("_")[2]; pr = prices.get(sym)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🚀 LONG",callback_data=f"pos_side_{sym}_long")
+    kb.button(text="📉 SHORT",callback_data=f"pos_side_{sym}_short")
+    kb.button(text="🔙 Назад",callback_data="open_pos_start"); kb.adjust(1)
+    await callback.message.edit_text(f"<b>{sym}</b> • ${pr:,.2f}\n\nВыбери сторону:",reply_markup=kb.as_markup())
+
+# ===== pos leverage =====
+@dp.callback_query(F.data.startswith("pos_side_"))
+async def pos_leverage(callback: CallbackQuery):
+    parts = callback.data.split("_"); sym = parts[2]; side = parts[3]
+    kb = InlineKeyboardBuilder()
+    for lev in [1,5,10,25,50,100]: kb.button(text=f"{lev}x",callback_data=f"pos_lev_{sym}_{side}_{lev}")
+    kb.button(text="🔙 Назад",callback_data=f"pos_sym_{sym}"); kb.adjust(3)
+    await callback.message.edit_text(f"<b>{sym} {side.upper()}</b>\n\nВыбери плечо:",reply_markup=kb.as_markup())
+
+# ===== pos confirm =====
+@dp.callback_query(F.data.startswith("pos_lev_"))
+async def pos_confirm(callback: CallbackQuery):
+    parts = callback.data.split("_"); sym = parts[2]; side = parts[3]; leverage = int(parts[4])
+    pr = prices.get(sym); btc_pr = prices.get("BTC")
+    margin_btc = 0.001
+    amount = margin_btc*btc_pr*leverage/pr
+    liq = pr*(1-0.9/leverage) if side=='long' else pr*(1+0.9/leverage)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Подтвердить",callback_data=f"pos_do_{sym}_{side}_{leverage}_{amount:.4f}")
+    kb.button(text="❌ Отмена",callback_data="futures"); kb.adjust(1)
+    await callback.message.edit_text(
+        f"<b>⚡ ПОДТВЕРЖДЕНИЕ</b>\n\n{sym} {side.upper()} {leverage}x\n"
+        f"Вход: ${pr:.2f}\nМаржа: {margin_btc:.4f} BTC\n"
+        f"Ликвидация: ${liq:.2f}\nОбъём: ${amount*pr:.0f}",
+        reply_markup=kb.as_markup()
+    )
+
+# ===== pos do =====
+@dp.callback_query(F.data.startswith("pos_do_"))
+async def pos_do(callback: CallbackQuery):
+    parts = callback.data.split("_"); sym = parts[2]; side = parts[3]; leverage = int(parts[4]); amount = float(parts[5])
+    uid = callback.from_user.id; pr = prices.get(sym); btc_pr = prices.get("BTC")
+    margin_btc = amount*pr/(leverage*btc_pr) if leverage>0 else 0.001
+    liq = pr*(1-0.9/leverage) if side=='long' else pr*(1+0.9/leverage)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if u['btc']<margin_btc: await callback.answer("Недостаточно маржи!",show_alert=True); return
+        pid = secrets.token_hex(6)
+        await db.execute("UPDATE users SET btc=btc-? WHERE tid=?",(margin_btc,uid))
+        await db.execute(
+            "INSERT INTO positions (id,tid,symbol,side,amount,leverage,entry,liq,margin) VALUES (?,?,?,?,?,?,?,?,?)",
+            (pid,uid,sym,side,amount,leverage,pr,liq,margin_btc)
+        )
+        if u['daily_date']==datetime.now().strftime('%Y%m%d'): await db.execute("UPDATE users SET daily_futures=1 WHERE tid=?",(uid,))
+        await db.commit()
+        await give_ach(db,uid,"first_futures")
+    await callback.answer("Позиция открыта!",show_alert=True)
+    await futures_menu(callback)
+
+# ===== close pos =====
+@dp.callback_query(F.data.startswith("close_pos_"))
+async def close_pos(callback: CallbackQuery):
+    pid = callback.data.split("_")[2]; uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        p = await db.execute("SELECT * FROM positions WHERE id=? AND tid=? AND status='open'",(pid,uid))
+        p = await p.fetchone()
+        if not p: await callback.answer("Позиция не найдена!",show_alert=True); return
+        p = dict(p); cur = prices.get(p['symbol']); entry = p['entry']; margin = p['margin']; leverage = p['leverage']
+        pnl = margin*(cur-entry)/entry*leverage if p['side']=='long' else margin*(entry-cur)/entry*leverage
+        new_btc = max(0,margin+pnl)
+        await db.execute("UPDATE users SET btc=btc+? WHERE tid=?",(new_btc,uid))
+        await db.execute("UPDATE positions SET status='closed',pnl=? WHERE id=?",(pnl,pid))
+        await db.commit()
+    await callback.answer(f"Закрыто! PnL: {pnl:.8f} BTC",show_alert=True)
+    await futures_menu(callback)
+
+# ===== business =====
+@dp.callback_query(F.data=="business")
+async def business(callback: CallbackQuery):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        biz = await db.execute("SELECT * FROM businesses ORDER BY price DESC LIMIT 10")
+        biz = await biz.fetchall()
+    txt = "<b>🏢 БИЗНЕС</b>\n\n"
+    if biz:
+        for b in biz:
+            b = dict(b); sold = b['total_sh']-b['avail_sh']; cap = b['price']*b['total_sh']
+            txt += f"• <b>{b['ticker']}</b> — {b['name']}\n  Цена: {b['price']:.8f} BTC | Продано: {sold}/{b['total_sh']} | Кап: {cap:.4f} BTC\n\n"
+    else: txt += "Нет бизнесов.\n\n"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🏗 Создать бизнес (0.5 BTC)",callback_data="create_biz")
+    if biz:
+        for b in biz: kb.button(text=f"Купить акции {b['ticker']}",callback_data=f"buy_shares_{b['id']}")
+    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
+    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
+
+# ===== create biz =====
+@dp.callback_query(F.data=="create_biz")
+async def create_biz(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if u['btc']<0.5: await callback.answer("Нужно 0.5 BTC!",show_alert=True); return
+        ticker = f"DEGEN{random.randint(100,999)}"; name = f"Degenerate {ticker}"
+        await db.execute("UPDATE users SET btc=btc-0.5 WHERE tid=?",(uid,))
+        await db.execute("INSERT INTO businesses (owner_id,name,ticker,price) VALUES (?,?,?,0.0001)",(uid,name,ticker))
+        await db.commit()
+        await give_ach(db,uid,"create_biz")
+    await callback.answer(f"Бизнес {ticker} создан!",show_alert=True)
+    await business(callback)
+
+# ===== buy shares =====
+@dp.callback_query(F.data.startswith("buy_shares_"))
+async def buy_shares(callback: CallbackQuery):
+    biz_id = int(callback.data.split("_")[2]); uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        b = await db.execute("SELECT * FROM businesses WHERE id=?",(biz_id,))
+        b = await b.fetchone()
+        if not b: await callback.answer("Бизнес не найден!",show_alert=True); return
+        b = dict(b)
+        if b['avail_sh']<=0: await callback.answer("Все акции проданы!",show_alert=True); return
+        u = await get_user(db,uid)
+        cost = b['price']
+        if u['btc']<cost: await callback.answer(f"Нужно {cost:.8f} BTC!",show_alert=True); return
+        await db.execute("UPDATE users SET btc=btc-? WHERE tid=?",(cost,uid))
+        await db.execute("UPDATE businesses SET avail_sh=avail_sh-1,price=price*1.01 WHERE id=?",(biz_id,))
+        existing = await db.execute("SELECT shares FROM biz_shares WHERE holder_id=? AND biz_id=?",(uid,biz_id))
+        existing = await existing.fetchone()
+        if existing: await db.execute("UPDATE biz_shares SET shares=shares+1 WHERE holder_id=? AND biz_id=?",(uid,biz_id))
+        else: await db.execute("INSERT INTO biz_shares (holder_id,biz_id,shares) VALUES (?,?,1)",(uid,biz_id))
+        owned = await db.execute("SELECT SUM(shares) as s FROM biz_shares WHERE biz_id=? AND holder_id=?",(biz_id,uid))
+        owned = await owned.fetchone()
+        if owned and owned[0]>=b['total_sh']*0.51 and b['owner_id']!=uid:
+            await db.execute("UPDATE businesses SET owner_id=? WHERE id=?",(uid,biz_id))
+            await db.execute("DELETE FROM biz_shares WHERE holder_id=? AND biz_id=?",(b['owner_id'],biz_id))
+            await give_ach(db,uid,"raid_biz")
+        await db.commit()
+    await callback.answer(f"Акция {b['ticker']} куплена!",show_alert=True)
+    await business(callback)
+
+# ===== bp =====
+@dp.callback_query(F.data=="bp")
+async def bp_menu(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        bp = await db.execute("SELECT * FROM bp WHERE tid=?",(uid,))
+        bp = await bp.fetchone(); bp = dict(bp) if bp else {'level':1,'xp':0,'premium':0}
+    txt = f"<b>💀 БАТЛ-ПАСС</b>\n\nУровень: <b>{bp['level']}</b>\nXP: {bp['xp']}/{bp['level']*100}\nСтатус: {'👑 Премиум' if bp['premium'] else '🆓 Бесплатный'}\n\n<b>Награды:</b>\nУр.5: +10% тапы\nУр.10: +1000 сат\nУр.15: +20% майнинг\nУр.20: 👑 Скин"
+    kb = InlineKeyboardBuilder()
+    if not bp['premium']: kb.button(text="👑 Премиум (0.01 BTC)",callback_data="buy_premium")
+    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
+    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
+
+# ===== buy premium =====
+@dp.callback_query(F.data=="buy_premium")
+async def buy_premium(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if u['btc']<0.01: await callback.answer("Нужно 0.01 BTC!",show_alert=True); return
+        await db.execute("UPDATE users SET btc=btc-0.01 WHERE tid=?",(uid,))
+        await db.execute("UPDATE bp SET premium=1 WHERE tid=?",(uid,))
+        await db.commit(); await give_ach(db,uid,"premium_bp")
+    await callback.answer("Премиум 👑",show_alert=True)
+    await bp_menu(callback)
+
+# ===== wheel =====
+@dp.callback_query(F.data=="wheel")
+async def wheel(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid); now = time.time()
+        if now-u['wheel_time']<43200:
+            rem = 43200-(now-u['wheel_time']); hrs = int(rem//3600); mins = int((rem%3600)//60)
+            await callback.answer(f"Доступно через {hrs}ч {mins}мин",show_alert=True); return
+        prizes = [("100 сат",100,"sat",30),("500 сат",500,"sat",25),("1000 сат",1000,"sat",15),
+                  ("0.0001 BTC",0.0001,"btc",10),("x2 тапы 1ч",0,"boost",8),("x2 майнинг 30м",0,"boost2",5),
+                  ("0.001 BTC",0.001,"btc",2),("Пустышка 💨",0,"none",5)]
+        total_weight = sum(p[3] for p in prizes)
+        if total_weight<=0: total_weight=1
+        r = random.randint(1,total_weight); cum = 0; prize = prizes[0]
+        for p in prizes:
+            cum += p[3]
+            if r<=cum: prize = p; break
+        if prize[2]=="sat": await db.execute("UPDATE users SET sat=sat+?,wheel_time=? WHERE tid=?",(prize[1],now,uid))
+        elif prize[2]=="btc": await db.execute("UPDATE users SET btc=btc+?,wheel_time=? WHERE tid=?",(prize[1],now,uid))
+        else: await db.execute("UPDATE users SET wheel_time=? WHERE tid=?",(now,uid))
+        await db.commit()
+    await callback.message.edit_text(f"<b>🎡 КОЛЕСО ФОРТУНЫ</b>\n\n🎰 Крутим...\n\n✨ Выпало: <b>{prize[0]}</b>!\n\n<i>Следующий раз через 12ч</i>",reply_markup=back_btn())
+
+# ===== daily =====
+@dp.callback_query(F.data=="daily")
+async def daily(callback: CallbackQuery):
+    uid = callback.from_user.id; today = datetime.now().strftime('%Y%m%d')
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if u['daily_date']!=today:
+            await db.execute("UPDATE users SET daily_date=?,daily_tap=0,daily_trade=0,daily_futures=0,daily_noliq=0 WHERE tid=?",(today,uid))
+            await db.commit(); u = await get_user(db,uid)
+        tap_done = u['daily_tap']>=100; trade_done = u['daily_trade']>=1; futures_done = u['daily_futures']>=1; noliq_done = u['daily_noliq']>=1
+        all_done = tap_done and trade_done and futures_done and noliq_done
+        if all_done:
+            e = await db.execute("SELECT 1 FROM ach WHERE tid=? AND ach_id='daily_done'",(uid,))
+            if not await e.fetchone():
+                await db.execute("INSERT INTO ach (tid,ach_id) VALUES (?,'daily_done')",(uid,))
+                await db.execute("UPDATE users SET lootboxes=lootboxes+1,sat=sat+500 WHERE tid=?",(uid,))
+                await db.commit()
+    txt = "<b>📋 ЕЖЕДНЕВНЫЕ ЗАДАНИЯ</b>\n\n"
+    txt += f"{'✅' if tap_done else '🔲'} 100 тапов ({min(u['daily_tap'],100)}/100): +50 сат\n"
+    txt += f"{'✅' if trade_done else '🔲'} Купить монету: +100 сат\n"
+    txt += f"{'✅' if futures_done else '🔲'} Открыть фьючерс: +200 сат\n"
+    txt += f"{'✅' if noliq_done else '🔲'} Не ликвидироваться: +150 сат\n"
+    txt += f"\n{'🎁 Все выполнено! +500 сат + 🎁' if all_done else 'Выполни все — лутбокс + 500 сат!'}"
+    await callback.message.edit_text(txt,reply_markup=back_btn())
+
+# ===== staking =====
+@dp.callback_query(F.data=="staking")
+async def staking_menu(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+    now = time.time(); staked_sat = u['staked_sat']>0 and u['stake_end']>now; staked_btc = u['staked_btc']>0 and u['stake_btc_end']>now
+    txt = "<b>🏦 СТЕЙКИНГ</b>\n\n"
+    if staked_sat:
+        rem = u['stake_end']-now; txt += f"🔒 Сатоши: {u['staked_sat']:,.0f}\n⏳ Осталось: {int(rem//3600)}ч {int((rem%3600)//60)}м\n\n"
+    elif staked_btc:
+        rem = u['stake_btc_end']-now; txt += f"🔒 BTC: {u['staked_btc']:.8f}\n⏳ Осталось: {int(rem//3600)}ч {int((rem%3600)//60)}м\n\n"
+    else: txt += "Нет активных стейкингов.\n\n"
+    txt += "<b>Ставки:</b>\n1ч — 0.3% | 6ч — 2.5%\n24ч — 12% | 72ч — 45%"
+    kb = InlineKeyboardBuilder()
+    if not staked_sat and not staked_btc:
+        kb.button(text="🔒 Застейкать сатоши",callback_data="stake_sat_start")
+        kb.button(text="🔒 Застейкать BTC",callback_data="stake_btc_start")
+    elif staked_sat and u['stake_end']<=now: kb.button(text="💰 Забрать сатоши",callback_data="claim_stake_sat")
+    elif staked_btc and u['stake_btc_end']<=now: kb.button(text="💰 Забрать BTC",callback_data="claim_stake_btc")
+    else: kb.button(text="🔓 Снять досрочно (-15%)",callback_data="unstake_all")
+    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
+    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
+
+# ===== stake sat start =====
+@dp.callback_query(F.data=="stake_sat_start")
+async def stake_sat_start(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+    kb = InlineKeyboardBuilder()
+    for amt in [100,500,1000,5000,10000]:
+        if u['sat']>=amt: kb.button(text=f"{amt:,} сат",callback_data=f"stake_sat_amt_{amt}")
+    kb.button(text="Всё",callback_data=f"stake_sat_amt_{int(u['sat'])}")
+    kb.button(text="🔙 Назад",callback_data="staking"); kb.adjust(2)
+    await callback.message.edit_text(f"<b>🔒 СТЕЙКИНГ САТОШИ</b>\n\n💰 Доступно: {u['sat']:,.0f} сат\n\n<b>Выбери сумму:</b>",reply_markup=kb.as_markup())
+
+# ===== stake sat amt =====
+@dp.callback_query(F.data.startswith("stake_sat_amt_"))
+async def stake_sat_amt(callback: CallbackQuery):
+    amt = float(callback.data.split("_")[3]); uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if amt>u['sat']: await callback.answer("Недостаточно!",show_alert=True); return
+    kb = InlineKeyboardBuilder()
+    for h in [1,6,24,72]: kb.button(text=f"{h}ч ({STAKING_RATES[h]*100}%)",callback_data=f"stake_sat_do_{amt}_{h}")
+    kb.button(text="🔙 Назад",callback_data="stake_sat_start"); kb.adjust(2)
+    await callback.message.edit_text(f"<b>Сумма: {amt:,.0f} сат</b>\n\nВыбери срок:",reply_markup=kb.as_markup())
+
+# ===== stake sat do =====
+@dp.callback_query(F.data.startswith("stake_sat_do_"))
+async def stake_sat_do(callback: CallbackQuery):
+    parts = callback.data.split("_"); amt = float(parts[3]); hours = int(parts[4]); uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if u['staked_sat']>0 or u['staked_btc']>0: await callback.answer("Уже есть стейкинг!",show_alert=True); return
+        if amt>u['sat']: await callback.answer("Недостаточно!",show_alert=True); return
+        await db.execute("UPDATE users SET sat=sat-?,staked_sat=?,stake_end=? WHERE tid=?",(amt,amt,time.time()+hours*3600,uid))
+        await db.commit()
+    rate = STAKING_RATES[hours]*100
+    await callback.message.edit_text(f"<b>🔒 ЗАСТЕЙКАНО!</b>\n\n💰 {amt:,.0f} сат\n⏳ {hours}ч\n📈 +{rate}%\n💎 Будет: {amt*(1+STAKING_RATES[hours]):,.0f} сат\n\n<i>Штраф за досрочное: 15%</i>",reply_markup=back_btn())
+
+# ===== stake btc start =====
+@dp.callback_query(F.data=="stake_btc_start")
+async def stake_btc_start(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+    kb = InlineKeyboardBuilder()
+    for amt in [0.0001,0.0005,0.001,0.005,0.01]:
+        if u['btc']>=amt: kb.button(text=f"{amt:.4f} BTC",callback_data=f"stake_btc_amt_{amt}")
+    kb.button(text="Всё",callback_data=f"stake_btc_amt_{u['btc']}")
+    kb.button(text="🔙 Назад",callback_data="staking"); kb.adjust(2)
+    await callback.message.edit_text(f"<b>🔒 СТЕЙКИНГ BTC</b>\n\n₿ Доступно: {u['btc']:.8f} BTC\n\n<b>Выбери сумму:</b>",reply_markup=kb.as_markup())
+
+# ===== stake btc amt =====
+@dp.callback_query(F.data.startswith("stake_btc_amt_"))
+async def stake_btc_amt(callback: CallbackQuery):
+    amt = float(callback.data.split("_")[3]); uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if amt>u['btc']: await callback.answer("Недостаточно!",show_alert=True); return
+    kb = InlineKeyboardBuilder()
+    for h in [1,6,24,72]: kb.button(text=f"{h}ч ({STAKING_RATES[h]*100}%)",callback_data=f"stake_btc_do_{amt}_{h}")
+    kb.button(text="🔙 Назад",callback_data="stake_btc_start"); kb.adjust(2)
+    await callback.message.edit_text(f"<b>Сумма: {amt:.8f} BTC</b>\n\nВыбери срок:",reply_markup=kb.as_markup())
+
+# ===== stake btc do =====
+@dp.callback_query(F.data.startswith("stake_btc_do_"))
+async def stake_btc_do(callback: CallbackQuery):
+    parts = callback.data.split("_"); amt = float(parts[3]); hours = int(parts[4]); uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if u['staked_sat']>0 or u['staked_btc']>0: await callback.answer("Уже есть стейкинг!",show_alert=True); return
+        if amt>u['btc']: await callback.answer("Недостаточно!",show_alert=True); return
+        await db.execute("UPDATE users SET btc=btc-?,staked_btc=?,stake_btc_end=? WHERE tid=?",(amt,amt,time.time()+hours*3600,uid))
+        await db.commit()
+    rate = STAKING_RATES[hours]*100
+    await callback.message.edit_text(f"<b>🔒 ЗАСТЕЙКАНО!</b>\n\n₿ {amt:.8f} BTC\n⏳ {hours}ч\n📈 +{rate}%\n💎 Будет: {amt*(1+STAKING_RATES[hours]):.8f} BTC\n\n<i>Штраф за досрочное: 15%</i>",reply_markup=back_btn())
+
+# ===== claim stake sat =====
+@dp.callback_query(F.data=="claim_stake_sat")
+async def claim_stake_sat(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if u['staked_sat']<=0 or u['stake_end']>time.time(): await callback.answer("Ещё рано!",show_alert=True); return
+        elapsed = time.time()-(u['stake_end']-3600); rate_key = 24
+        for h in [72,24,6,1]:
+            if elapsed>=h*3600*0.9: rate_key = h; break
+        rate = STAKING_RATES.get(rate_key,0.12); reward = u['staked_sat']*rate; total = u['staked_sat']+reward
+        await db.execute("UPDATE users SET sat=sat+?,staked_sat=0,stake_end=0 WHERE tid=?",(total,uid))
+        await db.commit()
+    await callback.message.edit_text(f"<b>💰 СТЕЙКИНГ ЗАВЕРШЁН!</b>\n\n💎 +{u['staked_sat']:,.0f} сат\n📈 +{reward:,.0f} сат\n💰 Итого: {total:,.0f} сат",reply_markup=back_btn())
+
+# ===== claim stake btc =====
+@dp.callback_query(F.data=="claim_stake_btc")
+async def claim_stake_btc(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if u['staked_btc']<=0 or u['stake_btc_end']>time.time(): await callback.answer("Ещё рано!",show_alert=True); return
+        elapsed = time.time()-(u['stake_btc_end']-3600); rate_key = 24
+        for h in [72,24,6,1]:
+            if elapsed>=h*3600*0.9: rate_key = h; break
+        rate = STAKING_RATES.get(rate_key,0.12); reward = u['staked_btc']*rate; total = u['staked_btc']+reward
+        await db.execute("UPDATE users SET btc=btc+?,staked_btc=0,stake_btc_end=0 WHERE tid=?",(total,uid))
+        await db.commit()
+    await callback.message.edit_text(f"<b>💰 СТЕЙКИНГ ЗАВЕРШЁН!</b>\n\n₿ +{u['staked_btc']:.8f} BTC\n📈 +{reward:.8f} BTC\n₿ Итого: {total:.8f} BTC",reply_markup=back_btn())
+
+# ===== unstake all =====
+@dp.callback_query(F.data=="unstake_all")
+async def unstake_all(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if u['staked_sat']>0:
+            penalty = u['staked_sat']*0.15; ret = u['staked_sat']-penalty
+            await db.execute("UPDATE users SET sat=sat+?,staked_sat=0,stake_end=0 WHERE tid=?",(ret,uid))
+            await db.commit()
+            await callback.message.edit_text(f"<b>🔓 ДОСРОЧНО</b>\n\n💰 +{ret:,.0f} сат\n💸 Штраф: -{penalty:,.0f} (15%)",reply_markup=back_btn())
+        elif u['staked_btc']>0:
+            penalty = u['staked_btc']*0.15; ret = u['staked_btc']-penalty
+            await db.execute("UPDATE users SET btc=btc+?,staked_btc=0,stake_btc_end=0 WHERE tid=?",(ret,uid))
+            await db.commit()
+            await callback.message.edit_text(f"<b>🔓 ДОСРОЧНО</b>\n\n₿ +{ret:.8f} BTC\n💸 Штраф: -{penalty:.8f} (15%)",reply_markup=back_btn())
+        else: await callback.answer("Нет стейкинга!",show_alert=True)
+
+# ===== lootbox =====
+@dp.callback_query(F.data=="lootbox")
+async def lootbox_menu(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+    kb = InlineKeyboardBuilder()
+    if u['lootboxes']>0: kb.button(text="🎁 Открыть!",callback_data="open_lootbox")
+    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
+    await callback.message.edit_text(f"<b>🎁 ЛУТБОКСЫ</b>\n\n📦 В наличии: {u['lootboxes']} шт.\n\n<i>Получи за выполнение всех заданий дня!</i>",reply_markup=kb.as_markup())
+
+# ===== open lootbox =====
+@dp.callback_query(F.data=="open_lootbox")
+async def open_lootbox(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if u['lootboxes']<=0: await callback.answer("Нет лутбоксов!",show_alert=True); return
+        r = random.random()
+        if r<0.6: reward = f"{random.randint(100,500)} сат"; amt = int(reward.split()[0]); await db.execute("UPDATE users SET sat=sat+?,lootboxes=lootboxes-1 WHERE tid=?",(amt,uid))
+        elif r<0.9: reward = f"{random.randint(1000,5000)} сат"; amt = int(reward.split()[0]); await db.execute("UPDATE users SET sat=sat+?,lootboxes=lootboxes-1 WHERE tid=?",(amt,uid))
+        else: btc_amt = random.uniform(0.005,0.01); reward = f"{btc_amt:.6f} BTC"; await db.execute("UPDATE users SET btc=btc+?,lootboxes=lootboxes-1 WHERE tid=?",(btc_amt,uid))
+        await db.commit()
+    await callback.message.edit_text(f"<b>🎁 ЛУТБОКС</b>\n\n📦 Открываем...\n\n✨ <b>{reward}</b>!\n\nОсталось: {u['lootboxes']-1}",reply_markup=back_btn())
+
+# ===== duel menu =====
+@dp.callback_query(F.data=="duel")
+async def duel_menu(callback: CallbackQuery):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        duels = await db.execute("SELECT * FROM duels WHERE status='open' LIMIT 5"); duels = await duels.fetchall()
+    txt = "<b>⚔️ ДУЭЛИ</b>\n\n"
+    if duels:
+        txt += "<b>Активные вызовы:</b>\n"
+        for d in duels:
+            d = dict(d)
+            txt += f"• ID{d['id']}: {d['amount']:,.0f} сат | {d['dtype']} | /accept_{d['id']}\n"
+    else: txt += "Нет активных вызовов.\n"
+    txt += "\n<b>Создать дуэль:</b>"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎲 Кубик",callback_data="duel_new_dice")
+    kb.button(text="🪙 Орёл/Решка",callback_data="duel_new_coin")
+    kb.button(text="🏀 Баскетбол",callback_data="duel_new_basket")
+    kb.button(text="🎯 Дартс",callback_data="duel_new_darts")
+    kb.button(text="🎰 Слоты",callback_data="duel_new_slots")
+    kb.button(text="🏆 Рейтинг",callback_data="duel_rating")
+    kb.button(text="🔙 Назад",callback_data="back"); kb.adjust(1)
+    await callback.message.edit_text(txt,reply_markup=kb.as_markup())
+
+# ===== duel rating =====
+@dp.callback_query(F.data=="duel_rating")
+async def duel_rating(callback: CallbackQuery):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        top = await db.execute("SELECT username,duel_wins,duel_losses FROM users WHERE duel_wins>0 ORDER BY duel_wins DESC LIMIT 10")
+        top = await top.fetchall()
+    txt = "<b>🏆 РЕЙТИНГ ДУЭЛЯНТОВ</b>\n\n"
+    for i,u in enumerate(top):
+        u = dict(u); wr = f"{u['duel_wins']/(u['duel_wins']+u['duel_losses'])*100:.0f}%" if (u['duel_wins']+u['duel_losses'])>0 else "—"
+        txt += f"{i+1}. {u['username']}: {u['duel_wins']}W/{u['duel_losses']}L ({wr})\n"
+    await callback.message.edit_text(txt,reply_markup=back_btn())
+
+# ===== duel new =====
+@dp.callback_query(F.data.startswith("duel_new_"))
+async def duel_new(callback: CallbackQuery):
+    dtype = callback.data.split("_")[2]; uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+    kb = InlineKeyboardBuilder()
+    for amt in [100,500,1000,5000,10000]:
+        if u['sat']>=amt: kb.button(text=f"{amt:,} сат",callback_data=f"duel_create_{dtype}_{amt}")
+    kb.button(text="🔙 Назад",callback_data="duel"); kb.adjust(2)
+    await callback.message.edit_text(f"<b>Создать дуэль: {dtype.upper()}</b>\n\nВыбери ставку:",reply_markup=kb.as_markup())
+
+# ===== duel create =====
+@dp.callback_query(F.data.startswith("duel_create_"))
+async def duel_create(callback: CallbackQuery):
+    parts = callback.data.split("_"); dtype = parts[2]; amt = float(parts[3]); uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row; u = await get_user(db,uid)
+        if u['sat']<amt: await callback.answer("Недостаточно сатоши!",show_alert=True); return
+        await db.execute("INSERT INTO duels (creator_id,amount,dtype,status) VALUES (?,?,?,'open')",(uid,amt,dtype))
+        await db.commit()
+        d = await db.execute("SELECT id FROM duels WHERE creator_id=? AND status='open' ORDER BY id DESC LIMIT 1",(uid,))
+        d = await d.fetchone()
+        did = d[0] if d else 0
+    await callback.message.edit_text(
+        f"<b>⚔️ ДУЭЛЬ СОЗДАНА!</b>\n\nТип: {dtype}\nСтавка: {amt:,.0f} сат\nID: {did}\n\n"
+        f"<i>Противник может принять вызов командой:</i>\n<code>/accept {did}</code>",
+        reply_markup=back_btn()
+    )
+
+# ===== lb =====
 @dp.callback_query(F.data=="lb")
 async def lb(callback: CallbackQuery):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -966,6 +1017,7 @@ async def lb(callback: CallbackQuery):
         txt += f"{i+1}. {name}: <b>{total:.4f} BTC</b>\n"
     await callback.message.edit_text(txt,reply_markup=back_btn())
 
+# ===== ФОН =====
 async def price_loop():
     while True: await prices.fetch(); await asyncio.sleep(30)
 
@@ -985,6 +1037,7 @@ async def liquidation_loop():
             await db.commit()
         await asyncio.sleep(10)
 
+# ===== ВАЖНО: этот хендлер должен быть ПОСЛЕДНИМ =====
 @dp.message()
 async def unknown(message: Message): await message.answer("Используй /start или /ref")
 
