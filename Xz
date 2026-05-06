@@ -2,44 +2,121 @@ import asyncio
 import json
 import time
 import random
-import hashlib
-import hmac
 import secrets
+import hashlib
+import sqlite3
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, 
-    InlineKeyboardButton, WebAppInfo, ReplyKeyboardMarkup,
-    KeyboardButton, MenuButtonWebApp
+    Message, CallbackQuery, InlineKeyboardMarkup,
+    InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 )
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums import ParseMode
-
-import aiosqlite
+from aiogram.client.default import DefaultBotProperties
 import aiohttp
-from fastapi import FastAPI, Request, HTTPException, Depends, WebSocket
-from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
-import uvicorn
+import aiosqlite
 
-TOKEN = "8773607737:AAFGqkf2pwyJhaeb6eWNC0lsWlKsiLue8EA"  # <-- ВСТАВЬ СЮДА ТОКЕН
+# ===== КОНФИГУРАЦИЯ =====
+TOKEN = "8773607737:AAFGqkf2pwyJhaeb6eWNC0lsWlKsiLue8EA"
+DB_PATH = "degen_bot.db"
 
-bot = Bot(token=TOKEN)
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-app = FastAPI(title="Degen Empire API")
-DB_PATH = "degen_empire.db"
+# ===== РЕАЛЬНЫЕ КУРСЫ С BINANCE =====
+class CryptoPrices:
+    def __init__(self):
+        self.prices = {
+            "BTC": 65000, "ETH": 3400, "LTC": 85,
+            "DOGE": 0.12, "SOL": 140, "XRP": 0.55,
+            "PEPE": 0.000007, "SHIB": 0.00002, "BONK": 0.000001,
+        }
+        self.changes = {k: 0.0 for k in self.prices}
+        self.events = []
+        self.last_fetch = 0
 
-# ============================================================
-# БАЗА ДАННЫХ
-# ============================================================
+    async def fetch_real_prices(self):
+        """Загружает реальные цены с Binance API"""
+        if time.time() - self.last_fetch < 30:
+            return
+        
+        symbols_map = {
+            "BTC": "BTCUSDT", "ETH": "ETHUSDT", "LTC": "LTCUSDT",
+            "DOGE": "DOGEUSDT", "SOL": "SOLUSDT", "XRP": "XRPUSDT",
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Основные монеты с Binance
+                for coin, symbol in symbols_map.items():
+                    try:
+                        async with session.get(
+                            f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}",
+                            timeout=aiohttp.ClientTimeout(total=5)
+                        ) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                old = self.prices.get(coin, float(data['price']))
+                                new = float(data['price'])
+                                self.changes[coin] = ((new - old) / old) * 100 if old > 0 else 0
+                                self.prices[coin] = new
+                    except:
+                        pass
+                
+                # PEPE, SHIB, BONK с CoinGecko (Binance не всегда отдаёт)
+                try:
+                    async with session.get(
+                        "https://api.coingecko.com/api/v3/simple/price?ids=pepe,shiba-inu,bonk&vs_currencies=usd",
+                        timeout=aiohttp.ClientTimeout(total=5)
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            for coin, key in [("PEPE", "pepe"), ("SHIB", "shiba-inu"), ("BONK", "bonk")]:
+                                if key in data:
+                                    old = self.prices.get(coin, data[key]['usd'])
+                                    new = data[key]['usd']
+                                    self.changes[coin] = ((new - old) / old) * 100 if old > 0 else 0
+                                    self.prices[coin] = new
+                except:
+                    pass
+            
+            self.last_fetch = time.time()
+            print(f"✅ Курсы обновлены: BTC=${self.prices['BTC']:.0f}")
+            
+        except Exception as e:
+            print(f"❌ Ошибка получения курсов: {e}")
 
+    def generate_event(self):
+        if random.random() < 0.15:
+            events_list = [
+                ("🚀 ПАМП! BTC летит вверх!", "BTC"),
+                ("📉 ДАМП! Рынок красный!", "BTC"),
+                ("🔥 Илон твитнул DOGE!", "DOGE"),
+                ("💩 PEPE обвалился на 40%!", "PEPE"),
+                ("⚡ Ликвидация хомяков!", "ALL"),
+                ("🎉 ALTSZN! Альты в космос!", "ALTS"),
+                ("💎 ETH ETF одобрен!", "ETH"),
+                ("🐳 Кит продал 10000 BTC!", "BTC"),
+                ("🔴 SHIB сжигает триллионы!", "SHIB"),
+                ("🟢 SOLana без сбоев 24 часа!", "SOL"),
+            ]
+            self.events.append(random.choice(events_list))
+            if len(self.events) > 10:
+                self.events.pop(0)
+
+    def get_price(self, symbol: str) -> float:
+        return self.prices.get(symbol, 0.0)
+
+prices = CryptoPrices()
+
+# ===== БАЗА ДАННЫХ =====
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('''
+        await db.executescript('''
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id INTEGER PRIMARY KEY,
                 username TEXT DEFAULT '',
@@ -55,56 +132,15 @@ async def init_db():
                 sol REAL DEFAULT 0.0,
                 xrp REAL DEFAULT 0.0,
                 tap_power INTEGER DEFAULT 1,
-                multi_tap_level INTEGER DEFAULT 0,
-                mining_hashrate REAL DEFAULT 0.0,
-                mining_level INTEGER DEFAULT 0,
-                last_mine_time REAL DEFAULT 0.0,
-                rank TEXT DEFAULT 'Бомж',
-                passive_income REAL DEFAULT 0.0,
-                referral_code TEXT DEFAULT '',
-                referred_by INTEGER DEFAULT NULL,
+                multi_tap INTEGER DEFAULT 0,
+                mining_hs REAL DEFAULT 0.0,
+                last_mine REAL DEFAULT 0.0,
                 total_taps INTEGER DEFAULT 0,
-                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS businesses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                owner_id INTEGER,
-                name TEXT,
-                ticker TEXT UNIQUE,
-                total_shares INTEGER DEFAULT 10000,
-                available_shares INTEGER DEFAULT 10000,
-                base_price REAL DEFAULT 0.00001,
-                current_price REAL DEFAULT 0.00001,
-                income_per_share REAL DEFAULT 0.0,
-                total_income REAL DEFAULT 0.0,
-                level INTEGER DEFAULT 1,
-                ceo_level INTEGER DEFAULT 0,
-                marketing_level INTEGER DEFAULT 0,
-                listing_level INTEGER DEFAULT 0,
-                audit_level INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_income_time REAL DEFAULT 0.0,
-                is_bankrupt INTEGER DEFAULT 0,
-                FOREIGN KEY (owner_id) REFERENCES users(telegram_id)
-            )
-        ''')
-        
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS business_shares (
-                holder_id INTEGER,
-                business_id INTEGER,
-                shares INTEGER DEFAULT 0,
-                total_spent REAL DEFAULT 0.0,
-                PRIMARY KEY (holder_id, business_id),
-                FOREIGN KEY (holder_id) REFERENCES users(telegram_id),
-                FOREIGN KEY (business_id) REFERENCES businesses(id)
-            )
-        ''')
-        
-        await db.execute('''
+                rank TEXT DEFAULT 'Бомж',
+                ref_code TEXT DEFAULT '',
+                ref_by INTEGER DEFAULT NULL
+            );
+            
             CREATE TABLE IF NOT EXISTS positions (
                 id TEXT PRIMARY KEY,
                 user_id INTEGER,
@@ -112,1040 +148,522 @@ async def init_db():
                 side TEXT,
                 amount REAL,
                 leverage INTEGER,
-                entry_price REAL,
-                take_profit REAL,
-                stop_loss REAL,
-                liquidation_price REAL,
+                entry REAL,
+                tp REAL,
+                sl REAL,
+                liq REAL,
                 margin REAL,
                 status TEXT DEFAULT 'open',
-                opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                closed_at TIMESTAMP,
-                pnl REAL DEFAULT 0.0,
-                FOREIGN KEY (user_id) REFERENCES users(telegram_id)
-            )
-        ''')
-        
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS tasks (
+                pnl REAL DEFAULT 0.0
+            );
+            
+            CREATE TABLE IF NOT EXISTS businesses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                task_type TEXT,
-                progress INTEGER DEFAULT 0,
-                target INTEGER DEFAULT 1,
-                completed INTEGER DEFAULT 0,
-                claimed INTEGER DEFAULT 0,
-                reset_at TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(telegram_id)
-            )
-        ''')
-        
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS battle_pass (
+                owner_id INTEGER,
+                name TEXT,
+                ticker TEXT UNIQUE,
+                total_sh INTEGER DEFAULT 10000,
+                avail_sh INTEGER DEFAULT 10000,
+                price REAL DEFAULT 0.00001,
+                income REAL DEFAULT 0.0
+            );
+            
+            CREATE TABLE IF NOT EXISTS biz_shares (
+                holder_id INTEGER,
+                biz_id INTEGER,
+                shares INTEGER DEFAULT 0,
+                PRIMARY KEY (holder_id, biz_id)
+            );
+            
+            CREATE TABLE IF NOT EXISTS bp (
                 user_id INTEGER PRIMARY KEY,
                 season INTEGER DEFAULT 1,
                 level INTEGER DEFAULT 1,
                 xp INTEGER DEFAULT 0,
-                premium INTEGER DEFAULT 0,
-                FOREIGN KEY (user_id) REFERENCES users(telegram_id)
-            )
+                premium INTEGER DEFAULT 0
+            );
         ''')
-        
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                symbol TEXT,
-                side TEXT,
-                amount REAL,
-                price REAL,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(telegram_id)
-            )
-        ''')
-        
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS referrals (
-                referrer_id INTEGER,
-                referred_id INTEGER,
-                level INTEGER DEFAULT 1,
-                total_earned REAL DEFAULT 0.0,
-                PRIMARY KEY (referrer_id, referred_id),
-                FOREIGN KEY (referrer_id) REFERENCES users(telegram_id),
-                FOREIGN KEY (referred_id) REFERENCES users(telegram_id)
-            )
-        ''')
-        
         await db.commit()
 
-# ============================================================
-# КУРСЫ КРИПТОВАЛЮТ (ЭМУЛЯЦИЯ + РЕАЛЬНЫЙ API)
-# ============================================================
+# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
+def get_rank(btc_val):
+    if btc_val >= 100: return "Деген"
+    if btc_val >= 10: return "Мегакит"
+    if btc_val >= 1: return "Кит"
+    if btc_val >= 0.1: return "Майнер"
+    if btc_val >= 0.01: return "Барыга"
+    if btc_val >= 0.001: return "Нищий"
+    return "Бомж"
 
-class CryptoPrices:
-    def __init__(self):
-        self.prices = {
-            "BTC": 65432.10,
-            "ETH": 3456.78,
-            "LTC": 89.34,
-            "DOGE": 0.1234,
-            "PEPE": 0.00000789,
-            "SHIB": 0.00002345,
-            "BONK": 0.00000123,
-            "SOL": 145.67,
-            "XRP": 0.5678,
-        }
-        self.changes = {k: 0.0 for k in self.prices}
-        self.events = []
-        self.last_fetch = time.time()
-    
-    async def fetch_real_prices(self):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    "https://api.binance.com/api/v3/ticker/price"
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        for item in data:
-                            symbol = item['symbol']
-                            if symbol == "BTCUSDT":
-                                self.prices["BTC"] = float(item['price'])
-                            elif symbol == "ETHUSDT":
-                                self.prices["ETH"] = float(item['price'])
-                            elif symbol == "LTCUSDT":
-                                self.prices["LTC"] = float(item['price'])
-                            elif symbol == "DOGEUSDT":
-                                self.prices["DOGE"] = float(item['price'])
-                            elif symbol == "SOLUSDT":
-                                self.prices["SOL"] = float(item['price'])
-                            elif symbol == "XRPUSDT":
-                                self.prices["XRP"] = float(item['price'])
-                        
-                        for k in self.prices:
-                            self.changes[k] = random.uniform(-5, 5)
-                        
-                        self.last_fetch = time.time()
-        except Exception as e:
-            print(f"Ошибка получения цен: {e}")
-            self.simulate_prices()
-    
-    def simulate_prices(self):
-        for k in self.prices:
-            change = random.uniform(-0.5, 0.5)
-            self.prices[k] *= (1 + change / 100)
-            self.changes[k] = change
-    
-    def get_price(self, symbol: str) -> float:
-        return self.prices.get(symbol, 0.0)
-    
-    def get_change(self, symbol: str) -> float:
-        return self.changes.get(symbol, 0.0)
-    
-    def generate_event(self):
-        if random.random() < 0.15:
-            event_types = [
-                ("🚀 ПАМП! BTC летит вверх!", "BTC", 15),
-                ("📉 ДАМП! Рынок красный!", "BTC", -20),
-                ("⚡ FOMO! Все скупают ETH!", "ETH", 25),
-                ("💀 Ликвидация хомяков!", "ALL", -10),
-                ("🎉 ALTSZN! Альты в космос!", "ALTS", 30),
-                ("🐳 Кит продал 10000 BTC!", "BTC", -8),
-                ("🔥 Илон твитнул DOGE!", "DOGE", 50),
-                ("💩 PEPE обвалился на 40%!", "PEPE", -40),
-            ]
-            event = random.choice(event_types)
-            self.events.append({
-                "text": event[0],
-                "symbol": event[1],
-                "impact": event[2],
-                "time": datetime.now().isoformat()
-            })
-            if len(self.events) > 10:
-                self.events.pop(0)
-
-prices = CryptoPrices()
-
-# ============================================================
-# ИГРОВЫЕ КОНСТАНТЫ
-# ============================================================
-
-RANK_THRESHOLDS = [
-    ("Бомж", 0),
-    ("Нищий", 0.001),
-    ("Барыга", 0.01),
-    ("Майнер", 0.1),
-    ("Кит", 1.0),
-    ("Мегакит", 10.0),
-    ("Деген", 100.0),
-]
-
-RANK_BONUSES = {
-    "Бомж": {"tap": 1.0, "mining": 1.0, "trading": 1.0},
-    "Нищий": {"tap": 1.05, "mining": 1.0, "trading": 1.0},
-    "Барыга": {"tap": 1.05, "mining": 1.05, "trading": 1.1},
-    "Майнер": {"tap": 1.1, "mining": 1.15, "trading": 1.1},
-    "Кит": {"tap": 1.15, "mining": 1.2, "trading": 1.2},
-    "Мегакит": {"tap": 1.2, "mining": 1.3, "trading": 1.3},
-    "Деген": {"tap": 1.3, "mining": 1.4, "trading": 1.4},
+RANK_EMOJI = {
+    "Бомж": "🟤", "Нищий": "⚪", "Барыга": "🟢",
+    "Майнер": "🔵", "Кит": "🟣", "Мегакит": "🟡", "Деген": "🔴"
 }
 
-TAP_BASE_REWARD = 1.0
-MINING_BASE_HASHRATE = 10.0
+async def get_user(db, uid):
+    u = await db.execute("SELECT * FROM users WHERE telegram_id = ?", (uid,))
+    u = await u.fetchone()
+    if not u:
+        ref = secrets.token_hex(4).upper()
+        await db.execute(
+            "INSERT INTO users (telegram_id, ref_code) VALUES (?, ?)", (uid, ref)
+        )
+        await db.execute("INSERT OR IGNORE INTO bp (user_id) VALUES (?)", (uid,))
+        await db.commit()
+        u = await db.execute("SELECT * FROM users WHERE telegram_id = ?", (uid,))
+        u = await u.fetchone()
+    return dict(u)
 
-BUSINESS_COSTS = {
-    "ceo": 0.05,
-    "marketing": 0.1,
-    "listing": 0.25,
-    "audit": 0.15,
-}
+def btc_value(u):
+    btc_price = prices.get_price("BTC")
+    if btc_price == 0: btc_price = 1
+    hold = u['btc'] + u['balance_sat'] / 1e8
+    for coin in ['eth', 'ltc', 'doge', 'sol', 'xrp']:
+        hold += u[coin] * prices.get_price(coin.upper()) / btc_price
+    for coin in ['pepe', 'shib', 'bonk']:
+        hold += u[coin] * prices.get_price(coin.upper()) / btc_price
+    return hold
 
-# ============================================================
-# ФУНКЦИИ РАСЧЁТА
-# ============================================================
+# ===== КЛАВИАТУРЫ =====
+def main_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🖐 Тапать", callback_data="tap")
+    kb.button(text="⛏ Майнинг", callback_data="mining")
+    kb.row()
+    kb.button(text="📈 Трейдинг", callback_data="trade")
+    kb.button(text="⚡ Фьючерсы", callback_data="futures")
+    kb.row()
+    kb.button(text="🏢 Бизнес", callback_data="business")
+    kb.button(text="💀 Батл-Пасс", callback_data="bp")
+    kb.row()
+    kb.button(text="🏆 Лидерборд", callback_data="lb")
+    kb.button(text="👤 Профиль", callback_data="profile")
+    kb.button(text="💱 Курсы", callback_data="rates")
+    kb.adjust(2)
+    return kb.as_markup()
 
-def calculate_btc_value(sat_balance, holdings, btc_price):
-    total = sat_balance / 1e8
-    for symbol, amount in holdings.items():
-        if symbol in prices.prices:
-            total += amount * prices.get_price(symbol) / btc_price
-    return total
+def back_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔙 Назад", callback_data="back")
+    return kb.as_markup()
 
-def get_rank(btc_value):
-    current_rank = "Бомж"
-    for name, threshold in RANK_THRESHOLDS:
-        if btc_value >= threshold:
-            current_rank = name
-    return current_rank
-
-def calculate_mining_income(hashrate, btc_price):
-    return hashrate * (1.0 / btc_price) / 3600.0
-
-def calculate_business_income(business, owner_rank):
-    base = business['total_shares'] * business['income_per_share']
-    bonus = RANK_BONUSES.get(owner_rank, {}).get('trading', 1.0)
-    ceo_bonus = 1 + business['ceo_level'] * 0.1
-    marketing_bonus = 1 + business['marketing_level'] * 0.15
-    return base * bonus * ceo_bonus * marketing_bonus
-
-def calculate_share_price(business):
-    sold = business['total_shares'] - business['available_shares']
-    if sold == 0:
-        return business['base_price']
-    return business['base_price'] * (1 + sold / 1000) ** 2
-
-# ============================================================
-# БОТ: КОМАНДЫ
-# ============================================================
-
+# ===== ОБРАБОТЧИКИ =====
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     args = message.text.split()
-    ref_code = None
-    if len(args) > 1:
-        ref_code = args[1]
+    ref_code = args[1] if len(args) > 1 else None
     
-    user_id = message.from_user.id
-    username = message.from_user.username or ""
-    first_name = message.from_user.first_name or ""
+    uid = message.from_user.id
+    uname = message.from_user.username or message.from_user.first_name or "Анон"
     
     async with aiosqlite.connect(DB_PATH) as db:
-        existing = await db.execute(
-            "SELECT telegram_id FROM users WHERE telegram_id = ?", 
-            (user_id,)
-        )
-        if not await existing.fetchone():
-            ref = await db.execute(
-                "SELECT telegram_id FROM users WHERE referral_code = ?",
-                (ref_code,)
-            )
-            ref_user = await ref.fetchone()
-            referred_by = ref_user[0] if ref_user else None
+        db.row_factory = aiosqlite.Row
+        u = await db.execute("SELECT * FROM users WHERE telegram_id = ?", (uid,))
+        u = await u.fetchone()
+        
+        if not u:
+            ref_by = None
+            if ref_code:
+                ref_user = await db.execute(
+                    "SELECT telegram_id FROM users WHERE ref_code = ?", (ref_code,)
+                )
+                ref_user = await ref_user.fetchone()
+                if ref_user:
+                    ref_by = ref_user[0]
             
-            referral_code = secrets.token_hex(4).upper()
+            code = secrets.token_hex(4).upper()
             await db.execute(
-                """INSERT INTO users 
-                (telegram_id, username, first_name, referral_code, referred_by)
-                VALUES (?, ?, ?, ?, ?)""",
-                (user_id, username, first_name, referral_code, referred_by)
+                "INSERT INTO users (telegram_id, username, ref_code, ref_by) VALUES (?, ?, ?, ?)",
+                (uid, uname, code, ref_by)
             )
+            await db.execute("INSERT OR IGNORE INTO bp (user_id) VALUES (?)", (uid,))
             
-            if referred_by:
+            if ref_by:
                 await db.execute(
-                    "INSERT OR IGNORE INTO referrals (referrer_id, referred_id) VALUES (?, ?)",
-                    (referred_by, user_id)
+                    "UPDATE users SET balance_sat = balance_sat + 1000 WHERE telegram_id = ?",
+                    (ref_by,)
                 )
             
-            await db.execute(
-                """INSERT OR IGNORE INTO battle_pass 
-                (user_id, season, level, xp, premium) 
-                VALUES (?, 1, 1, 0, 0)""",
-                (user_id,)
-            )
-            
             await db.commit()
-    
-    webapp_url = f"https://tma.degen-empire.ru?user_id={user_id}"
-    
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🎮 ИГРАТЬ", web_app=WebAppInfo(url=webapp_url))
-    kb.button(text="📊 ЛИДЕРБОРД", web_app=WebAppInfo(url=f"{webapp_url}&page=leaderboard"))
-    kb.button(text="⚡ ТРЕЙДИНГ", web_app=WebAppInfo(url=f"{webapp_url}&page=trading"))
-    kb.button(text="🏢 БИЗНЕС", web_app=WebAppInfo(url=f"{webapp_url}&page=business"))
-    kb.row()
-    kb.button(text="💀 БАТЛ-ПАСС", web_app=WebAppInfo(url=f"{webapp_url}&page=battlepass"))
-    kb.button(text="🔗 РЕФЕРАЛКА", web_app=WebAppInfo(url=f"{webapp_url}&page=referrals"))
-    kb.adjust(1)
     
     await message.answer(
         f"<b>💀 DEGEN EMPIRE</b>\n\n"
-        f"<i>С нуля до кита. Кликай, майни, трейди с плечом, "
-        f"захватывай бизнес. Кровь, слёзы, ликвидации.</i>\n\n"
-        f"⚡ Твой ID: {user_id}\n"
-        f"🏷 Рейтинг: Бомж\n"
-        f"💰 Баланс: 0 сатоши\n\n"
-        f"<b>Жми ИГРАТЬ!</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb.as_markup()
+        f"<i>Реальные курсы • Плечо до 100x • Бизнес • Батл-Пасс</i>\n\n"
+        f"👤 <b>{uname}</b>\n"
+        f"🏷 Рейтинг: 🟤 Бомж\n"
+        f"💰 Баланс: 0 сатоши\n"
+        f"₿ BTC: <b>${prices.get_price('BTC'):,.0f}</b>\n\n"
+        f"<b>Выбирай действие:</b>",
+        reply_markup=main_kb()
     )
 
-@dp.message(Command("leaderboard"))
-async def cmd_leaderboard(message: Message):
-    webapp_url = f"https://tma.degen-empire.ru?user_id={message.from_user.id}&page=leaderboard"
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📊 ОТКРЫТЬ ЛИДЕРБОРД", web_app=WebAppInfo(url=webapp_url))
-    await message.answer(
-        "<b>📊 ЛИДЕРБОРД</b>\nТоп дегенов империи!",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb.as_markup()
+@dp.callback_query(F.data == "back")
+async def cmd_back(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "<b>💀 DEGEN EMPIRE</b>\n\nВыбирай действие:",
+        reply_markup=main_kb()
     )
 
-@dp.message(Command("trading"))
-async def cmd_trading(message: Message):
-    webapp_url = f"https://tma.degen-empire.ru?user_id={message.from_user.id}&page=trading"
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⚡ ТРЕЙДИНГ С ПЛЕЧОМ", web_app=WebAppInfo(url=webapp_url))
-    await message.answer(
-        "<b>⚡ ФЬЮЧЕРСЫ С КРЕДИТНЫМ ПЛЕЧОМ</b>\nЛонг, шорт, TP/SL. Ликвидация без смс.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb.as_markup()
-    )
+@dp.callback_query(F.data == "rates")
+async def cmd_rates(callback: CallbackQuery):
+    await prices.fetch_real_prices()
+    txt = "<b>💱 КУРСЫ КРИПТОВАЛЮТ (Binance)</b>\n\n"
+    for sym, price in prices.prices.items():
+        change = prices.changes.get(sym, 0)
+        sign = "+" if change >= 0 else ""
+        txt += f"{'📈' if change >= 0 else '📉'} <b>{sym}</b>: ${price:,.{2 if price > 1 else 8}f} ({sign}{change:.2f}%)\n"
+    await callback.message.edit_text(txt, reply_markup=back_kb())
 
-# ============================================================
-# FASTAPI: ОСНОВНЫЕ ЭНДПОИНТЫ
-# ============================================================
-
-async def get_user_or_create(user_id: int):
+@dp.callback_query(F.data == "profile")
+async def cmd_profile(callback: CallbackQuery):
+    uid = callback.from_user.id
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        user = await db.execute(
-            "SELECT * FROM users WHERE telegram_id = ?", 
-            (user_id,)
-        )
-        user = await user.fetchone()
-        if not user:
-            await db.execute(
-                "INSERT INTO users (telegram_id, referral_code) VALUES (?, ?)",
-                (user_id, secrets.token_hex(4).upper())
-            )
-            await db.execute(
-                "INSERT OR IGNORE INTO battle_pass (user_id) VALUES (?)",
-                (user_id,)
-            )
-            await db.commit()
-            user = await db.execute(
-                "SELECT * FROM users WHERE telegram_id = ?", 
-                (user_id,)
-            )
-            user = await user.fetchone()
-        return dict(user)
+        u = await get_user(db, uid)
+        btc_val = btc_value(u)
+        rank = get_rank(btc_val)
+        
+        txt = f"<b>👤 ПРОФИЛЬ</b>\n\n"
+        txt += f"🏷 Рейтинг: {RANK_EMOJI.get(rank,'')} {rank}\n"
+        txt += f"💰 Сатоши: {u['balance_sat']:,.0f}\n"
+        txt += f"₿ BTC: {u['btc']:.8f}\n"
+        txt += f"💎 Общий капитал: {btc_val:.4f} BTC (~${btc_val * prices.get_price('BTC'):,.0f})\n"
+        txt += f"🖐 Тапов: {u['total_taps']:,}\n"
+        txt += f"⛏ Хешрейт: {u['mining_hs']:.1f} H/s\n\n"
+        txt += f"<i>Реф-код: {u['ref_code']}</i>"
+        
+        await callback.message.edit_text(txt, reply_markup=back_kb())
 
-def verify_telegram_auth(auth_data: str) -> Optional[int]:
-    try:
-        data = json.loads(auth_data)
-        user_id = int(data.get('id', 0))
-        if user_id > 0:
-            return user_id
-    except:
-        pass
-    return None
-
-@app.get("/api/user/{user_id}")
-async def api_get_user(user_id: int):
-    user = await get_user_or_create(user_id)
-    btc_price = prices.get_price("BTC")
-    holdings = {
-        "BTC": user['btc'],
-        "ETH": user['eth'],
-        "LTC": user['ltc'],
-        "DOGE": user['doge'],
-        "PEPE": user['pepe'],
-        "SHIB": user['shib'],
-        "BONK": user['bonk'],
-        "SOL": user['sol'],
-        "XRP": user['xrp'],
-    }
-    btc_value = calculate_btc_value(user['balance_sat'], holdings, btc_price)
-    rank = get_rank(btc_value)
-    rank_bonus = RANK_BONUSES.get(rank, RANK_BONUSES["Бомж"])
-    
-    return {
-        "user": user,
-        "btc_price": btc_price,
-        "btc_value": btc_value,
-        "rank": rank,
-        "rank_bonus": rank_bonus,
-        "sat_balance": user['balance_sat'],
-        "holdings": holdings,
-        "prices": prices.prices,
-        "changes": prices.changes,
-        "events": prices.events[-5:],
-    }
-
-@app.post("/api/tap")
-async def api_tap(request: Request):
-    body = await request.json()
-    user_id = body.get('user_id', 0)
-    taps = body.get('taps', 1)
-    
-    if user_id == 0:
-        return JSONResponse({"error": "Unauthorized"}, 401)
-    
+@dp.callback_query(F.data == "tap")
+async def cmd_tap(callback: CallbackQuery):
+    uid = callback.from_user.id
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        user = await db.execute("SELECT * FROM users WHERE telegram_id = ?", (user_id,))
-        user = await user.fetchone()
+        u = await get_user(db, uid)
+        btc_val = btc_value(u)
+        rank = get_rank(btc_val)
         
-        if not user:
-            return JSONResponse({"error": "User not found"}, 404)
+        bonus = 1.0
+        if rank == "Нищий": bonus = 1.05
+        elif rank == "Барыга": bonus = 1.1
+        elif rank == "Майнер": bonus = 1.15
+        elif rank == "Кит": bonus = 1.2
+        elif rank in ["Мегакит", "Деген"]: bonus = 1.3
         
-        user_dict = dict(user)
-        btc_value = calculate_btc_value(
-            user_dict['balance_sat'],
-            {k: user_dict[k] for k in ['btc','eth','ltc','doge','pepe','shib','bonk','sol','xrp']},
-            prices.get_price("BTC")
-        )
-        rank = get_rank(btc_value)
-        rank_bonus = RANK_BONUSES.get(rank, RANK_BONUSES["Бомж"])
+        reward = u['tap_power'] * bonus
+        multi = 1 + u['multi_tap'] * 0.25
+        reward *= multi
         
-        total_reward = 0
-        for _ in range(taps):
-            reward = TAP_BASE_REWARD * user_dict['tap_power'] * rank_bonus['tap']
-            if user_dict['multi_tap_level'] > 0:
-                reward *= (1 + user_dict['multi_tap_level'] * 0.25)
-            total_reward += reward
-        
-        new_balance = user_dict['balance_sat'] + total_reward
-        new_taps = user_dict['total_taps'] + taps
+        new_bal = u['balance_sat'] + reward
+        new_taps = u['total_taps'] + 1
         
         await db.execute(
             "UPDATE users SET balance_sat = ?, total_taps = ? WHERE telegram_id = ?",
-            (new_balance, new_taps, user_id)
+            (new_bal, new_taps, uid)
         )
-        
-        await add_battle_pass_xp(db, user_id, taps * 0.1)
+        await db.execute("UPDATE bp SET xp = xp + 1 WHERE user_id = ?", (uid,))
         await db.commit()
     
-    return {
-        "reward": total_reward,
-        "new_balance": new_balance,
-        "total_taps": new_taps,
-        "rank": rank,
-    }
+    txt = f"<b>🖐 ТАП!</b>\n\n"
+    txt += f"💎 +{reward:.1f} сатоши\n"
+    txt += f"💰 Баланс: {new_bal:,.0f} сатоши\n"
+    txt += f"👆 Всего тапов: {new_taps:,}\n"
+    txt += f"⚡ Сила тапа: {u['tap_power']} (x{bonus:.2f})"
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🖐 Тапнуть ещё!", callback_data="tap")
+    kb.button(text="🔙 Назад", callback_data="back")
+    kb.adjust(1)
+    
+    await callback.message.edit_text(txt, reply_markup=kb.as_markup())
 
-async def add_battle_pass_xp(db, user_id, xp):
-    await db.execute(
-        "UPDATE battle_pass SET xp = xp + ? WHERE user_id = ?",
-        (xp, user_id)
+@dp.callback_query(F.data == "mining")
+async def cmd_mining(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        u = await get_user(db, uid)
+        
+        now = time.time()
+        elapsed = now - u['last_mine'] if u['last_mine'] > 0 else 0
+        income = u['mining_hs'] * (1.0 / prices.get_price("BTC")) * elapsed
+        
+        if income > 0:
+            await db.execute(
+                "UPDATE users SET balance_sat = balance_sat + ?, last_mine = ? WHERE telegram_id = ?",
+                (income, now, uid)
+            )
+            await db.commit()
+            u = await get_user(db, uid)
+        
+        txt = f"<b>⛏ МАЙНИНГ</b>\n\n"
+        txt += f"⚡ Хешрейт: {u['mining_hs']:.1f} H/s\n"
+        txt += f"💎 Доход: ~{(u['mining_hs'] * (1.0 / prices.get_price('BTC')) * 3600):.0f} сат/час\n"
+        if income > 0:
+            txt += f"🕐 Намайнено: +{income:.0f} сат\n"
+        txt += f"\n💰 Баланс: {u['balance_sat']:,.0f} сат\n\n"
+        txt += f"<b>🛒 Купить ферму:</b>"
+        
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🖥 GTX 1060 • 50 сат", callback_data="buy_miner_1")
+        kb.button(text="🖥 RTX 3080 • 500 сат", callback_data="buy_miner_2")
+        kb.button(text="🖥 RTX 4090 • 5000 сат", callback_data="buy_miner_3")
+        kb.button(text="🏭 ASIC • 50000 сат", callback_data="buy_miner_4")
+        kb.button(text="🔙 Назад", callback_data="back")
+        kb.adjust(1)
+        
+        await callback.message.edit_text(txt, reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data.startswith("buy_miner_"))
+async def cmd_buy_miner(callback: CallbackQuery):
+    tier = int(callback.data.split("_")[2])
+    costs = {1: 50, 2: 500, 3: 5000, 4: 50000}
+    hashes = {1: 10, 2: 50, 3: 200, 4: 1000}
+    
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        u = await get_user(db, uid)
+        
+        if u['balance_sat'] < costs[tier]:
+            await callback.answer(f"Недостаточно сатоши! Нужно {costs[tier]}", show_alert=True)
+            return
+        
+        await db.execute(
+            "UPDATE users SET balance_sat = balance_sat - ?, mining_hs = mining_hs + ?, last_mine = ? WHERE telegram_id = ?",
+            (costs[tier], hashes[tier], time.time(), uid)
+        )
+        await db.commit()
+        
+        await callback.answer(f"Ферма куплена! +{hashes[tier]} H/s", show_alert=True)
+        await cmd_mining(callback)
+
+@dp.callback_query(F.data == "trade")
+async def cmd_trade(callback: CallbackQuery):
+    kb = InlineKeyboardBuilder()
+    for sym in ["BTC", "ETH", "LTC", "DOGE", "SOL", "XRP", "PEPE", "SHIB", "BONK"]:
+        kb.button(text=f"{sym} • ${prices.get_price(sym):,.2f}" if prices.get_price(sym) > 1 else f"{sym} • ${prices.get_price(sym):.8f}", callback_data=f"trade_{sym}")
+    kb.button(text="🔙 Назад", callback_data="back")
+    kb.adjust(2)
+    
+    await callback.message.edit_text(
+        "<b>📈 ТРЕЙДИНГ (СПОТ)</b>\n\nВыбери монету для торговли:",
+        reply_markup=kb.as_markup()
     )
-    bp = await db.execute(
-        "SELECT level, xp FROM battle_pass WHERE user_id = ?",
-        (user_id,)
+
+@dp.callback_query(F.data.startswith("trade_"))
+async def cmd_trade_coin(callback: CallbackQuery):
+    sym = callback.data.split("_")[1]
+    price = prices.get_price(sym)
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"🟢 КУПИТЬ {sym}", callback_data=f"buy_{sym}")
+    kb.button(text=f"🔴 ПРОДАТЬ {sym}", callback_data=f"sell_{sym}")
+    kb.button(text="🔙 Назад", callback_data="trade")
+    kb.adjust(1)
+    
+    await callback.message.edit_text(
+        f"<b>📈 {sym}</b>\n\nТекущая цена: <b>${price:,.{2 if price > 1 else 8}f}</b>\n\nВыбери действие:",
+        reply_markup=kb.as_markup()
     )
-    bp = await bp.fetchone()
-    if bp:
-        xp_needed = bp['level'] * 1000
-        if bp['xp'] >= xp_needed:
-            new_level = bp['level'] + 1
-            await db.execute(
-                "UPDATE battle_pass SET level = ?, xp = xp - ? WHERE user_id = ?",
-                (new_level, xp_needed, user_id)
-            )
 
-@app.post("/api/trade")
-async def api_trade(request: Request):
-    body = await request.json()
-    user_id = body.get('user_id')
-    symbol = body.get('symbol', 'BTC')
-    action = body.get('action', 'buy')
-    amount = float(body.get('amount', 0))
-    
-    if amount <= 0:
-        return JSONResponse({"error": "Неверная сумма"}, 400)
-    
-    price = prices.get_price(symbol)
-    if price == 0:
-        return JSONResponse({"error": "Неизвестный символ"}, 400)
+@dp.callback_query(F.data.startswith("buy_"))
+async def cmd_buy_coin(callback: CallbackQuery):
+    sym = callback.data.split("_")[1]
+    # Упрощённая покупка: фиксированная сумма в BTC
+    uid = callback.from_user.id
+    price = prices.get_price(sym)
+    btc_price = prices.get_price("BTC")
     
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        user = await db.execute("SELECT * FROM users WHERE telegram_id = ?", (user_id,))
-        user = await user.fetchone()
-        if not user:
-            return JSONResponse({"error": "User not found"}, 404)
+        u = await get_user(db, uid)
         
-        user_dict = dict(user)
-        cost = amount * price / prices.get_price("BTC")
+        amount_btc = 0.001
+        if u['btc'] < amount_btc:
+            await callback.answer("Недостаточно BTC! Нужно 0.001 BTC", show_alert=True)
+            return
         
-        if action == 'buy':
-            cost_btc = cost
-            if user_dict['btc'] < cost_btc:
-                return JSONResponse({"error": "Недостаточно BTC"}, 400)
-            
-            new_btc = user_dict['btc'] - cost_btc
-            col = symbol.lower()
-            new_hold = user_dict.get(col, 0) + amount
-            
-            await db.execute(
-                f"UPDATE users SET btc = ?, {col} = ? WHERE telegram_id = ?",
-                (new_btc, new_hold, user_id)
-            )
-        else:
-            col = symbol.lower()
-            if user_dict.get(col, 0) < amount:
-                return JSONResponse({"error": f"Недостаточно {symbol}"}, 400)
-            
-            btc_gain = cost
-            new_btc = user_dict['btc'] + btc_gain
-            new_hold = user_dict[col] - amount
-            
-            await db.execute(
-                f"UPDATE users SET btc = ?, {col} = ? WHERE telegram_id = ?",
-                (new_btc, new_hold, user_id)
-            )
+        coin_amount = amount_btc * btc_price / price
+        coin_col = sym.lower()
         
         await db.execute(
-            "INSERT INTO trades (user_id, symbol, side, amount, price) VALUES (?, ?, ?, ?, ?)",
-            (user_id, symbol, action, amount, price)
+            f"UPDATE users SET btc = btc - ?, {coin_col} = {coin_col} + ? WHERE telegram_id = ?",
+            (amount_btc, coin_amount, uid)
         )
         await db.commit()
-    
-    return {"success": True, "price": price, "cost_btc": cost}
+        
+        await callback.answer(f"Куплено {coin_amount:.4f} {sym}", show_alert=True)
+        await cmd_back(callback)
 
-@app.post("/api/trade/futures")
-async def api_open_futures(request: Request):
-    body = await request.json()
-    user_id = body.get('user_id')
-    symbol = body.get('symbol', 'BTC')
-    side = body.get('side', 'long')
-    amount = float(body.get('amount', 0))
-    leverage = int(body.get('leverage', 1))
-    take_profit = float(body.get('take_profit', 0))
-    stop_loss = float(body.get('stop_loss', 0))
-    
-    if amount <= 0:
-        return JSONResponse({"error": "Сумма должна быть больше нуля"}, 400)
-    if leverage < 1 or leverage > 100:
-        return JSONResponse({"error": "Плечо от 1 до 100"}, 400)
-    
-    price = prices.get_price(symbol)
-    if price == 0:
-        return JSONResponse({"error": "Неизвестный символ"}, 400)
+@dp.callback_query(F.data.startswith("sell_"))
+async def cmd_sell_coin(callback: CallbackQuery):
+    sym = callback.data.split("_")[1]
+    uid = callback.from_user.id
+    price = prices.get_price(sym)
+    btc_price = prices.get_price("BTC")
     
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        user = await db.execute("SELECT * FROM users WHERE telegram_id = ?", (user_id,))
-        user = await user.fetchone()
-        if not user:
-            return JSONResponse({"error": "User not found"}, 404)
+        u = await get_user(db, uid)
+        coin_col = sym.lower()
+        coin_amount = u.get(coin_col, 0)
         
-        user_dict = dict(user)
-        margin = amount / leverage
-        margin_btc = margin * price / prices.get_price("BTC")
+        if coin_amount <= 0:
+            await callback.answer(f"У тебя нет {sym}!", show_alert=True)
+            return
         
-        if user_dict['btc'] < margin_btc:
-            return JSONResponse({"error": "Недостаточно маржи"}, 400)
-        
-        liquidation_price = price * (1 - 0.9 / leverage) if side == 'long' else price * (1 + 0.9 / leverage)
-        
-        pos_id = secrets.token_hex(8)
-        await db.execute(
-            "UPDATE users SET btc = btc - ? WHERE telegram_id = ?",
-            (margin_btc, user_id)
-        )
+        btc_gain = coin_amount * price / btc_price
         
         await db.execute(
-            """INSERT INTO positions 
-            (id, user_id, symbol, side, amount, leverage, entry_price, 
-            take_profit, stop_loss, liquidation_price, margin)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (pos_id, user_id, symbol, side, amount, leverage, price,
-             take_profit, stop_loss, liquidation_price, margin_btc)
+            f"UPDATE users SET btc = btc + ?, {coin_col} = 0 WHERE telegram_id = ?",
+            (btc_gain, uid)
         )
         await db.commit()
-    
-    return {
-        "success": True,
-        "position_id": pos_id,
-        "entry_price": price,
-        "liquidation_price": liquidation_price,
-        "margin": margin_btc,
-        "leverage": leverage,
-    }
+        
+        await callback.answer(f"Продано! +{btc_gain:.8f} BTC", show_alert=True)
+        await cmd_back(callback)
 
-@app.post("/api/trade/close")
-async def api_close_futures(request: Request):
-    body = await request.json()
-    user_id = body.get('user_id')
-    position_id = body.get('position_id')
-    
+@dp.callback_query(F.data == "futures")
+async def cmd_futures(callback: CallbackQuery):
+    uid = callback.from_user.id
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        u = await get_user(db, uid)
+        
         pos = await db.execute(
-            "SELECT * FROM positions WHERE id = ? AND user_id = ? AND status = 'open'",
-            (position_id, user_id)
-        )
-        pos = await pos.fetchone()
-        if not pos:
-            return JSONResponse({"error": "Позиция не найдена"}, 404)
-        
-        pos_dict = dict(pos)
-        current_price = prices.get_price(pos_dict['symbol'])
-        entry = pos_dict['entry_price']
-        amount = pos_dict['amount']
-        leverage = pos_dict['leverage']
-        side = pos_dict['side']
-        margin = pos_dict['margin']
-        
-        if side == 'long':
-            pnl_pct = (current_price - entry) / entry * leverage * 100
-            pnl_btc = margin * (current_price - entry) / entry * leverage
-        else:
-            pnl_pct = (entry - current_price) / entry * leverage * 100
-            pnl_btc = margin * (entry - current_price) / entry * leverage
-        
-        new_btc = margin + pnl_btc
-        if new_btc < 0:
-            new_btc = 0
-        
-        await db.execute(
-            "UPDATE users SET btc = btc + ? WHERE telegram_id = ?",
-            (new_btc, user_id)
-        )
-        
-        await db.execute(
-            """UPDATE positions SET 
-            status = 'closed', closed_at = CURRENT_TIMESTAMP, pnl = ? 
-            WHERE id = ?""",
-            (pnl_btc, position_id)
-        )
-        await db.commit()
-    
-    return {
-        "success": True,
-        "pnl_btc": pnl_btc,
-        "pnl_pct": pnl_pct,
-        "was_liquidated": new_btc == 0,
-    }
-
-@app.post("/api/business/create")
-async def api_create_business(request: Request):
-    body = await request.json()
-    user_id = body.get('user_id')
-    name = body.get('name', '')
-    ticker = body.get('ticker', '').upper()
-    
-    if not name or not ticker:
-        return JSONResponse({"error": "Название и тикер обязательны"}, 400)
-    
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        user = await db.execute("SELECT * FROM users WHERE telegram_id = ?", (user_id,))
-        user = await user.fetchone()
-        if not user:
-            return JSONResponse({"error": "User not found"}, 404)
-        
-        user_dict = dict(user)
-        btc_value = calculate_btc_value(
-            user_dict['balance_sat'],
-            {k: user_dict[k] for k in ['btc','eth','ltc','doge','pepe','shib','bonk','sol','xrp']},
-            prices.get_price("BTC")
-        )
-        
-        if btc_value < 0.1:
-            return JSONResponse({"error": "Нужен минимум ранг 'Майнер' (0.1 BTC)"}, 403)
-        
-        cost = 0.5
-        if user_dict['btc'] < cost:
-            return JSONResponse({"error": f"Нужно {cost} BTC для создания бизнеса"}, 400)
-        
-        existing = await db.execute(
-            "SELECT id FROM businesses WHERE ticker = ?", (ticker,)
-        )
-        if await existing.fetchone():
-            return JSONResponse({"error": "Такой тикер уже занят"}, 400)
-        
-        await db.execute(
-            "UPDATE users SET btc = btc - ? WHERE telegram_id = ?",
-            (cost, user_id)
-        )
-        
-        await db.execute(
-            """INSERT INTO businesses 
-            (owner_id, name, ticker, total_shares, available_shares, base_price, current_price, income_per_share)
-            VALUES (?, ?, ?, 10000, 10000, 0.00001, 0.00001, 0.00000001)""",
-            (user_id, name, ticker)
-        )
-        await db.commit()
-    
-    return {"success": True, "ticker": ticker, "cost": cost}
-
-@app.post("/api/business/buy_shares")
-async def api_buy_shares(request: Request):
-    body = await request.json()
-    user_id = body.get('user_id')
-    business_id = body.get('business_id')
-    shares = int(body.get('shares', 0))
-    
-    if shares <= 0:
-        return JSONResponse({"error": "Количество акций > 0"}, 400)
-    
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        biz = await db.execute("SELECT * FROM businesses WHERE id = ?", (business_id,))
-        biz = await biz.fetchone()
-        if not biz:
-            return JSONResponse({"error": "Бизнес не найден"}, 404)
-        
-        biz_dict = dict(biz)
-        if biz_dict['available_shares'] < shares:
-            return JSONResponse({"error": "Недостаточно акций"}, 400)
-        
-        price_per_share = calculate_share_price(biz_dict)
-        total_cost_btc = price_per_share * shares
-        
-        user = await db.execute("SELECT * FROM users WHERE telegram_id = ?", (user_id,))
-        user = await user.fetchone()
-        user_dict = dict(user)
-        
-        if user_dict['btc'] < total_cost_btc:
-            return JSONResponse({"error": f"Нужно {total_cost_btc:.8f} BTC"}, 400)
-        
-        await db.execute(
-            "UPDATE users SET btc = btc - ? WHERE telegram_id = ?",
-            (total_cost_btc, user_id)
-        )
-        
-        await db.execute(
-            "UPDATE businesses SET available_shares = available_shares - ?, current_price = ? WHERE id = ?",
-            (shares, price_per_share, business_id)
-        )
-        
-        existing = await db.execute(
-            "SELECT shares FROM business_shares WHERE holder_id = ? AND business_id = ?",
-            (user_id, business_id)
-        )
-        existing = await existing.fetchone()
-        if existing:
-            await db.execute(
-                "UPDATE business_shares SET shares = shares + ?, total_spent = total_spent + ? WHERE holder_id = ? AND business_id = ?",
-                (shares, total_cost_btc, user_id, business_id)
-            )
-        else:
-            await db.execute(
-                "INSERT INTO business_shares (holder_id, business_id, shares, total_spent) VALUES (?, ?, ?, ?)",
-                (user_id, business_id, shares, total_cost_btc)
-            )
-        
-        owner_earnings = total_cost_btc * 0.9
-        await db.execute(
-            "UPDATE users SET btc = btc + ? WHERE telegram_id = ?",
-            (owner_earnings, biz_dict['owner_id'])
-        )
-        
-        total_held = await db.execute(
-            "SELECT SUM(shares) as total FROM business_shares WHERE business_id = ?",
-            (business_id,)
-        )
-        total_held = await total_held.fetchone()
-        
-        if total_held and total_held[0] >= biz_dict['total_shares'] * 0.51:
-            current_owner = biz_dict['owner_id']
-            holder_id = user_id
-            if current_owner != holder_id:
-                current_owner_shares = await db.execute(
-                    "SELECT shares FROM business_shares WHERE holder_id = ? AND business_id = ?",
-                    (current_owner, business_id)
-                )
-                current_owner_shares = await current_owner_shares.fetchone()
-                
-                if not current_owner_shares or current_owner_shares[0] < biz_dict['total_shares'] * 0.5:
-                    compensation = biz_dict['total_shares'] * price_per_share * 0.5
-                    await db.execute(
-                        "UPDATE users SET btc = btc + ? WHERE telegram_id = ?",
-                        (compensation, current_owner)
-                    )
-                    
-                    await db.execute(
-                        "UPDATE businesses SET owner_id = ? WHERE id = ?",
-                        (holder_id, business_id)
-                    )
-                    
-                    await db.execute(
-                        "DELETE FROM business_shares WHERE holder_id = ? AND business_id = ?",
-                        (current_owner, business_id)
-                    )
-        
-        await db.commit()
-    
-    return {"success": True, "price_per_share": price_per_share, "total_cost": total_cost_btc}
-
-@app.get("/api/leaderboard/{category}")
-async def api_leaderboard(category: str = "capital"):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        
-        if category == "capital":
-            users = await db.execute(
-                "SELECT telegram_id, username, first_name, btc, balance_sat FROM users ORDER BY btc DESC LIMIT 100"
-            )
-            users = await users.fetchall()
-            btc_price = prices.get_price("BTC")
-            leaderboard = []
-            for u in users:
-                total_btc = u['btc'] + u['balance_sat'] / 1e8
-                leaderboard.append({
-                    "telegram_id": u['telegram_id'],
-                    "username": u['username'],
-                    "first_name": u['first_name'],
-                    "total_btc": total_btc,
-                })
-            leaderboard.sort(key=lambda x: x['total_btc'], reverse=True)
-        
-        elif category == "business":
-            biz = await db.execute(
-                """SELECT b.*, u.username, u.first_name, 
-                (b.total_shares - b.available_shares) as sold_shares
-                FROM businesses b 
-                JOIN users u ON b.owner_id = u.telegram_id
-                ORDER BY b.current_price * b.total_shares DESC LIMIT 50"""
-            )
-            biz = await biz.fetchall()
-            leaderboard = [dict(b) for b in biz]
-        
-        else:
-            leaderboard = []
-    
-    return {"category": category, "data": leaderboard}
-
-@app.get("/api/prices")
-async def api_prices():
-    return {
-        "prices": prices.prices,
-        "changes": prices.changes,
-        "events": prices.events[-5:],
-    }
-
-@app.get("/api/battlepass/{user_id}")
-async def api_battlepass(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        bp = await db.execute(
-            "SELECT * FROM battle_pass WHERE user_id = ?", (user_id,)
-        )
-        bp = await bp.fetchone()
-        if not bp:
-            return {"level": 1, "xp": 0, "premium": 0}
-        return dict(bp)
-
-@app.post("/api/battlepass/buy_premium")
-async def api_buy_premium(request: Request):
-    body = await request.json()
-    user_id = body.get('user_id')
-    cost = 0.01
-    
-    async with aiosqlite.connect(DB_PATH) as db:
-        user = await db.execute("SELECT btc FROM users WHERE telegram_id = ?", (user_id,))
-        user = await user.fetchone()
-        if not user or user[0] < cost:
-            return JSONResponse({"error": "Недостаточно BTC (нужно 0.01)"}, 400)
-        
-        await db.execute(
-            "UPDATE users SET btc = btc - ? WHERE telegram_id = ?",
-            (cost, user_id)
-        )
-        await db.execute(
-            "UPDATE battle_pass SET premium = 1 WHERE user_id = ?",
-            (user_id,)
-        )
-        await db.commit()
-    
-    return {"success": True}
-
-@app.get("/api/positions/{user_id}")
-async def api_positions(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        positions = await db.execute(
             "SELECT * FROM positions WHERE user_id = ? AND status = 'open'",
-            (user_id,)
+            (uid,)
         )
-        positions = await positions.fetchall()
-        
-        result = []
-        for p in positions:
-            p_dict = dict(p)
-            current_price = prices.get_price(p_dict['symbol'])
-            entry = p_dict['entry_price']
-            leverage = p_dict['leverage']
-            side = p_dict['side']
-            
-            if side == 'long':
-                pnl_pct = (current_price - entry) / entry * leverage * 100
-            else:
-                pnl_pct = (entry - current_price) / entry * leverage * 100
-            
-            p_dict['current_price'] = current_price
-            p_dict['pnl_pct'] = pnl_pct
-            p_dict['is_liquidation_close'] = (
-                (side == 'long' and current_price <= p_dict['liquidation_price']) or
-                (side == 'short' and current_price >= p_dict['liquidation_price'])
-            )
-            result.append(p_dict)
+        pos = await pos.fetchall()
     
-    return {"positions": result}
+    txt = "<b>⚡ ФЬЮЧЕРСЫ</b>\n\n"
+    
+    if pos:
+        txt += "<b>Открытые позиции:</b>\n"
+        for p in pos:
+            p = dict(p)
+            current = prices.get_price(p['symbol'])
+            if p['side'] == 'long':
+                pnl = (current - p['entry']) / p['entry'] * p['leverage'] * 100
+            else:
+                pnl = (p['entry'] - current) / p['entry'] * p['leverage'] * 100
+            
+            emoji = "🟢" if pnl >= 0 else "🔴"
+            txt += f"{emoji} {p['symbol']} {p['side'].upper()} {p['leverage']}x | PNL: {pnl:.1f}%\n"
+            txt += f"   Вход: ${p['entry']:.2f} | Сейчас: ${current:.2f}\n"
+            txt += f"   Ликв: ${p['liq']:.2f}\n\n"
+    else:
+        txt += "Нет открытых позиций.\n\n"
+    
+    txt += f"<i>Баланс BTC: {u['btc']:.8f}</i>"
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🚀 Открыть LONG", callback_data="open_long")
+    kb.button(text="📉 Открыть SHORT", callback_data="open_short")
+    if pos:
+        kb.button(text="❌ Закрыть позицию", callback_data="close_pos")
+    kb.button(text="🔙 Назад", callback_data="back")
+    kb.adjust(1)
+    
+    await callback.message.edit_text(txt, reply_markup=kb.as_markup())
 
-# ============================================================
-# ФОНОВЫЕ ЗАДАЧИ
-# ============================================================
+@dp.callback_query(F.data == "lb")
+async def cmd_lb(callback: CallbackQuery):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        users = await db.execute(
+            "SELECT telegram_id, username, btc, balance_sat FROM users ORDER BY btc DESC LIMIT 20"
+        )
+        users = await users.fetchall()
+    
+    txt = "<b>🏆 ЛИДЕРБОРД</b>\n\n"
+    for i, u in enumerate(users):
+        u = dict(u)
+        total = u['btc'] + u['balance_sat'] / 1e8
+        name = u['username'] or f"ID:{u['telegram_id']}"
+        txt += f"{i+1}. {name}: <b>{total:.4f} BTC</b>\n"
+    
+    await callback.message.edit_text(txt, reply_markup=back_kb())
 
-async def update_prices_loop():
+@dp.callback_query(F.data == "business")
+async def cmd_business(callback: CallbackQuery):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        biz = await db.execute("SELECT * FROM businesses ORDER BY price DESC LIMIT 10")
+        biz = await biz.fetchall()
+    
+    txt = "<b>🏢 БИЗНЕС</b>\n\n"
+    if biz:
+        for b in biz:
+            b = dict(b)
+            txt += f"• <b>{b['ticker']}</b> — {b['name']}\n"
+            txt += f"  Цена: {b['price']:.8f} BTC | Акций: {b['avail_sh']}/{b['total_sh']}\n\n"
+    else:
+        txt += "Нет созданных бизнесов.\n\n"
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🏗 Создать бизнес", callback_data="create_biz")
+    kb.button(text="🔙 Назад", callback_data="back")
+    kb.adjust(1)
+    
+    await callback.message.edit_text(txt, reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data == "bp")
+async def cmd_bp(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        bp = await db.execute("SELECT * FROM bp WHERE user_id = ?", (uid,))
+        bp = await bp.fetchone()
+        bp = dict(bp) if bp else {'level': 1, 'xp': 0, 'premium': 0}
+    
+    txt = f"<b>💀 БАТЛ-ПАСС (Сезон 1)</b>\n\n"
+    txt += f"Уровень: <b>{bp['level']}</b>\n"
+    txt += f"XP: {bp['xp']}/{bp['level'] * 100}\n"
+    txt += f"Статус: {'👑 Премиум' if bp['premium'] else '🆓 Бесплатный'}\n\n"
+    txt += "<b>Награды:</b>\n"
+    txt += "Ур.5: +10% к тапам\n"
+    txt += "Ур.10: +1000 сатоши\n"
+    txt += "Ур.15: +20% к майнингу\n"
+    txt += "Ур.20: 👑 Скин «Кит»\n"
+    
+    kb = InlineKeyboardBuilder()
+    if not bp['premium']:
+        kb.button(text="👑 Купить Премиум (0.01 BTC)", callback_data="buy_premium")
+    kb.button(text="🔙 Назад", callback_data="back")
+    kb.adjust(1)
+    
+    await callback.message.edit_text(txt, reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data == "buy_premium")
+async def cmd_buy_premium(callback: CallbackQuery):
+    uid = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        u = await get_user(db, uid)
+        if u['btc'] < 0.01:
+            await callback.answer("Недостаточно BTC! Нужно 0.01", show_alert=True)
+            return
+        await db.execute("UPDATE users SET btc = btc - 0.01 WHERE telegram_id = ?", (uid,))
+        await db.execute("UPDATE bp SET premium = 1 WHERE user_id = ?", (uid,))
+        await db.commit()
+    
+    await callback.answer("Премиум активирован! 👑", show_alert=True)
+    await cmd_bp(callback)
+
+# ===== ФОНОВЫЕ ЗАДАЧИ =====
+async def price_updater():
     while True:
         await prices.fetch_real_prices()
         prices.generate_event()
-        
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            
-            positions = await db.execute(
-                "SELECT * FROM positions WHERE status = 'open'"
-            )
-            positions = await positions.fetchall()
-            
-            for p in positions:
-                p_dict = dict(p)
-                current_price = prices.get_price(p_dict['symbol'])
-                side = p_dict['side']
-                liq_price = p_dict['liquidation_price']
-                
-                is_liquidated = (
-                    (side == 'long' and current_price <= liq_price) or
-                    (side == 'short' and current_price >= liq_price)
-                )
-                
-                if is_liquidated:
-                    await db.execute(
-                        """UPDATE positions SET 
-                        status = 'liquidated', closed_at = CURRENT_TIMESTAMP, pnl = ?
-                        WHERE id = ?""",
-                        (-p_dict['margin'], p_dict['id'])
-                    )
-            
-            await db.commit()
-        
-        await asyncio.sleep(5)
-
-async def mining_loop():
-    while True:
-        async with aiosqlite.connect(DB_PATH) as db:
-            users = await db.execute(
-                "SELECT telegram_id, mining_hashrate, balance_sat, last_mine_time FROM users WHERE mining_hashrate > 0"
-            )
-            users = await users.fetchall()
-            now = time.time()
-            btc_price = prices.get_price("BTC")
-            
-            for u in users:
-                elapsed = now - u[3] if u[3] > 0 else 0
-                if elapsed >= 1.0:
-                    income = calculate_mining_income(u[1], btc_price) * elapsed
-                    await db.execute(
-                        "UPDATE users SET balance_sat = balance_sat + ?, last_mine_time = ? WHERE telegram_id = ?",
-                        (income, now, u[0])
-                    )
-            await db.commit()
-        
-        await asyncio.sleep(1)
-
-async def business_income_loop():
-    while True:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            businesses = await db.execute("SELECT * FROM businesses")
-            businesses = await businesses.fetchall()
-            
-            now = time.time()
-            for b in businesses:
-                b_dict = dict(b)
-                if now - b_dict['last_income_time'] >= 3600:
-                    owner = await db.execute(
-                        "SELECT * FROM users WHERE telegram_id = ?",
-                        (b_dict['owner_id'],)
-                    )
-                    owner = await owner.fetchone()
-                    if owner:
-                        owner_dict = dict(owner)
-                        btc_value = calculate_btc_value(
-                            owner_dict['balance_sat'],
-                            {k: owner_dict[k] for k in ['btc','eth','ltc','doge','pepe','shib','bonk','sol','xrp']},
-                            prices.get_price("BTC")
-                        )
-                        rank = get_rank(btc_value)
-                        income = calculate_business_income(b_dict, rank)
-                        
-                        await db.execute(
-                            "UPDATE users SET balance_sat = balance_sat + ? WHERE telegram_id = ?",
-                            (income, b_dict['owner_id'])
-                        )
-                        await db.execute(
-                            "UPDATE businesses SET total_income = total_income + ?, last_income_time = ? WHERE id = ?",
-                            (income, now, b_dict['id'])
-                        )
-                        
-                        holders = await db.execute(
-                            "SELECT * FROM business_shares WHERE business_id = ?",
-                            (b_dict['id'],)
-                        )
-                        holders = await holders.fetchall()
-                        for h in holders:
-                            dividend = income * (h[2] / b_dict['total_shares']) * 0.3
-                            await db.execute(
-                                "UPDATE users SET balance_sat = balance_sat + ? WHERE telegram_id = ?",
-                                (dividend, h[0])
-                            )
-            await db.commit()
-        
-        await asyncio.sleep(3600)
-
-# ============================================================
-# ЗАПУСК
-# ============================================================
-
-@app.on_event("startup")
-async def startup():
-    await init_db()
-    asyncio.create_task(update_prices_loop())
-    asyncio.create_task(mining_loop())
-    asyncio.create_task(business_income_loop())
-    print("✅ Degen Empire API запущен")
-
-async def run_bot():
-    await dp.start_polling(bot)
+        await asyncio.sleep(30)
 
 async def main():
-    await asyncio.gather(
-        uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=8000)).serve(),
-        run_bot(),
-    )
+    await init_db()
+    asyncio.create_task(price_updater())
+    print("✅ Degen Empire запущен!")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
